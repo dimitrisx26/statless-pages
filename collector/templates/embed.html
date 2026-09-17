@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>statless · {{ doc_key }}</title>
+<style>
+:root{--fg:#37352f;--muted:#787774;--pill:#f1f1ef}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{display:flex;align-items:center;justify-content:center;background:transparent;
+ font:12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Helvetica,Arial,sans-serif;
+ color:var(--fg);-webkit-font-smoothing:antialiased}
+.badge{display:inline-flex;align-items:center;gap:6px;background:var(--pill);
+ border:1px solid rgba(0,0,0,.06);border-radius:999px;padding:3px 10px 3px 8px;
+ text-decoration:none;color:var(--fg);white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;background:#46a758;flex:none}
+.num{font-variant-numeric:tabular-nums;font-weight:600}
+.label{color:var(--muted)}
+.badge:hover{border-color:rgba(0,0,0,.14)}
+@media (prefers-color-scheme:dark){
+ :root{--fg:#e3e2e0;--muted:#979795;--pill:#2a2a2a}
+ .badge{border-color:rgba(255,255,255,.08)}
+ .badge:hover{border-color:rgba(255,255,255,.18)}
+}
+</style>
+</head>
+<body>
+<a class="badge" href="{{ base_url }}/stats/{{ doc_key }}" target="_blank" rel="noopener" title="statless · cookie-free views">
+<span class="dot" aria-hidden="true"></span>
+<span class="num">{{ views }}</span><span class="label">views</span>
+</a>
+<script>
+(function(){
+var KEY="{{ doc_key }}",SENT={};
+function beat(t){if(SENT[t])return;SENT[t]=1;
+ try{var u="/heartbeat/"+encodeURIComponent(KEY);
+ var d=JSON.stringify({t:t});
+ if(navigator.sendBeacon){navigator.sendBeacon(u,new Blob([d],{type:"application/json"}));}
+ else{fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:d,keepalive:true});}
+ }catch(e){}}
+[15,30,60,120].forEach(function(t){setTimeout(function(){beat(t)},t*1000)});
+document.addEventListener("visibilitychange",function(){
+ if(document.visibilityState==="visible")return;
+ var e=Math.floor((Date.now()-T0)/1000);
+ var b=e>=120?120:e>=60?60:e>=30?30:e>=15?15:0;if(b)beat(b);});
+var T0=Date.now();
+})();
+</script>
+</body>
+</html>
