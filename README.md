@@ -99,6 +99,17 @@ uvicorn collector.main:app --reload
 - Rate-limited per socket IP; `/stats` errors are generic (DB details logged server-side only).
 - Heartbeats carry only `{t}` — no scroll/click telemetry.
 
+## Scaling notes
+
+**Run a single worker.** The shipped `statless` entrypoint uses one process, and that's deliberate:
+
+- The IP-hash salt and the rate limiter live in process memory, so multiple workers would multiply uniques and rate limits independently (N workers ≈ N× uniques, N× rate limit).
+- SQLite is single-writer — extra workers only contend on the write lock.
+
+One event loop easily serves thousands of pixel/heartbeat requests per second; the DB is the bottleneck, not Python.
+
+**If you outgrow it:** move to PostgreSQL, run N replicas, and delegate rate limiting to your proxy (e.g. nginx `limit_req`). Hashing across workers then requires a deterministic, date-based salt derived from a managed `SERVER_SECRET` — planned but not implemented; the current in-memory salt is single-process by design.
+
 ## License
 
 AGPLv3 — see [LICENSE](LICENSE).
