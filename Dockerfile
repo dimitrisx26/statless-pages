@@ -8,8 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install uv (single static binary)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# Install uv — pinned for reproducible builds (matches CI-era uv)
+COPY --from=ghcr.io/astral-sh/uv:0.12.15 /uv /usr/local/bin/uv
 
 # Dependency layer: only pyproject + lock invalidate it
 COPY pyproject.toml uv.lock ./
