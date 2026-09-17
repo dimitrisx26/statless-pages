@@ -28,8 +28,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+from . import __version__, salt
 from . import database as db
-from . import salt
 from .config import get_settings
 from .geo import get_geo
 
@@ -158,6 +158,22 @@ async def _record_view(doc_key: str, request: Request, ref: str = "") -> None:
         log.debug("view ingest failed for %s", doc_key, exc_info=True)
 
 
+async def _record_heartbeat(doc_key: str, request: Request, dwell_seconds: int) -> None:
+    ip_hash, country = _identity(request)
+    try:
+        await db.log_event(
+            doc_key=doc_key,
+            ip_hash=ip_hash,
+            country=country,
+            referrer=_referrer(request),
+            ua=request.headers.get("user-agent", "") or "",
+            kind="heartbeat",
+            dwell_seconds=dwell_seconds,
+        )
+    except Exception:
+        log.debug("heartbeat ingest failed for %s", doc_key, exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init_db()
@@ -186,7 +202,7 @@ async def lifespan(app: FastAPI):
     await db.close_db()
 
 
-app = FastAPI(title="statless-pages", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="statless-pages", version=__version__, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # beacon POSTs come from Notion iframes; no cookies involved
@@ -307,16 +323,21 @@ async def pixel(doc_key: str, request: Request, background: BackgroundTasks, ref
     return _no_store(Response(PIXEL_SVG, media_type="image/svg+xml"))
 
 
+async def _view_count_safe(doc_key: str) -> int:
+    """View count, or 0 on DB errors — embed/badge must never 500."""
+    try:
+        return await db.get_view_count(doc_key)
+    except Exception:  # noqa: BLE001 — degrade to 0 on DB errors
+        return 0
+
+
 @app.get("/embed/{doc_key}", response_class=HTMLResponse)
 async def embed(doc_key: str, request: Request, background: BackgroundTasks) -> Response:
     if not _valid_doc(doc_key):
         return _no_store(Response("invalid doc key", status_code=400, media_type="text/plain"))
     if _tracking_allowed(request) and _limiter.allow(_socket_ip(request)):
         background.add_task(_record_view, doc_key, request)
-    try:
-        views: int = await db.get_view_count(doc_key)
-    except Exception:  # noqa: BLE001 — badge degrades to 0 on DB errors
-        views = 0
+    views = await _view_count_safe(doc_key)
     resp = TEMPLATES.TemplateResponse(
         request,
         "embed.html",
@@ -338,19 +359,7 @@ async def heartbeat(doc_key: str, beat: Heartbeat, request: Request) -> JSONResp
         return _no_store(JSONResponse({"ok": True, "tracked": False}))
     if not _limiter.allow(_socket_ip(request)):
         return _no_store(JSONResponse({"ok": False, "error": "rate limited"}, status_code=429))
-    ip_hash, country = _identity(request)
-    try:
-        await db.log_event(
-            doc_key=doc_key,
-            ip_hash=ip_hash,
-            country=country,
-            referrer=_referrer(request),
-            ua=request.headers.get("user-agent", "") or "",
-            kind="heartbeat",
-            dwell_seconds=beat.t,
-        )
-    except Exception:
-        log.debug("heartbeat ingest failed for %s", doc_key, exc_info=True)
+    await _record_heartbeat(doc_key, request, beat.t)
     return _no_store(JSONResponse({"ok": True, "t": beat.t}))
 
 
@@ -358,10 +367,7 @@ async def heartbeat(doc_key: str, beat: Heartbeat, request: Request) -> JSONResp
 async def badge(doc_key: str) -> Response:
     if not _valid_doc(doc_key):
         return _no_store(Response("invalid", status_code=400, media_type="text/plain"))
-    try:
-        views = await db.get_view_count(doc_key)
-    except Exception:  # noqa: BLE001 — badge degrades to 0 on DB errors
-        views = 0
+    views = await _view_count_safe(doc_key)
     label = f"{views} views" if views != 1 else "1 view"
     w = 8 * len(label) + 28
     svg = (
