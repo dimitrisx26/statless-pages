@@ -119,11 +119,13 @@ https://www.maxmind.com — required attribution notice per the GeoLite2 EULA.
 
 ## Local dev (no Docker)
 
+Requires [uv](https://docs.astral.sh/uv/). `uv.lock` is committed so everyone gets the same dependency versions.
+
 ```bash
-python3.13 -m venv .venv && source .venv/bin/activate
-pip install .[dev]
-pytest -q
-uvicorn collector.main:app --reload
+uv sync --extra dev     # creates .venv from uv.lock
+uv run pytest -q        # tests
+uv run ruff check collector tests
+uv run uvicorn collector.main:app --reload
 ```
 
 ## Privacy & compliance
