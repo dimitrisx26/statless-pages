@@ -14,7 +14,7 @@ th,td{border:1px solid #e3e2e0;padding:0.4em 0.6em;text-align:left;font-size:0.9
 </style>
 </head>
 <body>
-<h1>Privacy — what this collector stores (and what it never stores)</h1>
+<h1>Privacy - what this collector stores (and what it never stores)</h1>
 <p>This service counts page views and reading time for Notion pages, newsletters,
 and README files. It sets <strong>no cookies</strong>, uses no ETags, and does no
 fingerprinting. This page describes the data this collector itself processes;
@@ -28,20 +28,23 @@ the operator of this deployment is the controller for it.</p>
 <tr><td><code>ip_hash</code></td><td>HMAC-SHA256(IP, salt)[:32], salt RAM-only, rotated every
 SALT_ROTATE_HOURS (default 24h). Raw IPs are never written to disk.</td><td>Approximate unique counts</td></tr>
 <tr><td><code>country</code></td><td>2-letter ISO country from GeoLite2 (or <code>XX</code> unknown)</td><td>Coarse geography only</td></tr>
-<tr><td><code>referrer</code></td><td>Either an approved <code>?ref=</code> tag or <code>scheme://host</code> only —
+<tr><td><code>referrer</code></td><td>Either an approved <code>?ref=</code> tag or <code>scheme://host</code> only -
 query strings and userinfo are stripped</td><td>Where readers came from</td></tr>
-<tr><td><code>ua</code></td><td>User-Agent, truncated to 512 chars</td><td>Approximate client stats</td></tr>
+<tr><td><code>ua</code></td><td>User-Agent, truncated to 512 chars. Reported only as a
+coarse family label in <code>/stats</code> (e.g. "mobile-safari") - never the
+raw string</td><td>Approximate client stats</td></tr>
 <tr><td><code>dwell_seconds</code></td><td>One of 15/30/60/120 (heartbeats only)</td><td>Reading depth</td></tr>
 </table>
 
 <h2>Never stored</h2>
 <p>Raw IP addresses. Cookies or device identifiers. Query strings or paths from
 referrers. Scroll, click, or input telemetry. Heartbeat payloads beyond the
-4-value bucket <code>{"t": 15|30|60|120}</code>.</p>
+4-value bucket <code>{"t": 15|30|60|120}</code>. The full User-Agent string is
+never exposed via the stats API - only a coarse family label derived from it.</p>
 
 <h2>Retention</h2>
 <p>Events older than <code>RETENTION_DAYS</code> (default 180) are deleted
-automatically. <code>RETENTION_DAYS=0</code> disables automatic deletion — the
+automatically. <code>RETENTION_DAYS=0</code> disables automatic deletion - the
 operator then carries the storage-limitation duty themselves.</p>
 
 <h2>Opt-out</h2>
@@ -55,6 +58,13 @@ erasure request. Operators can hard-delete all events for a given
 <code>doc_key</code> with <code>db.purge_doc()</code>, and daily retention
 pruning bounds all stored data automatically.</p>
 
+<h2>Visibility of statistics</h2>
+<p>Aggregate counts for a page may be publicly visible at
+<code>/stats/...doc_key...</code> unless the operator has gated them with an
+access token. Individual, identifying data is not published there - only the
+aggregate fields described above (views, unique counts within each salt
+window, dwell buckets, top countries/referrers, coarse browser-family labels).</p>
+
 <h2>Legal position (not legal advice)</h2>
 <p>Cookie-free, no-identifier tracking with rotating pseudonymised IPs is
 commonly run on legitimate interests (GDPR Art. 6(1)(f)); pseudonymised IP
@@ -65,7 +75,7 @@ interpretations (notably DE/FR). Operators embedding this tracker in EU-facing
 pages should publish this page, name a contact, and record a DPIA/legitimate-
 interest assessment. UK GDPR/PECR and US state privacy laws (e.g. CCPA/CPRA
 "sale/share" and universal opt-out signals like GPC) have separate,
-operator-specific requirements — this software implements the technical
+operator-specific requirements - this software implements the technical
 signals (DNT/Sec-GPC honoring, no cookies, origin-only referrers, bounded
 retention), but compliance decisions rest with the operator.</p>
 </body>
