@@ -11,24 +11,42 @@ All settings are overridable via environment variables:
     TRUST_PROXY    Trust X-Forwarded-For / X-Real-IP headers. Enable ONLY behind a reverse
                    proxy, otherwise clients can spoof IPs via headers (default: false)
     RATE_LIMIT     Max tracked events per minute per client (0 disables, default: 120)
+    EMBED_ALLOWED_ORIGINS  Extra origins allowed to frame the embed widget, comma-separated
+                   (default: Notion apex + wildcard domains). Wildcards never match the apex
+                   domain - add both when you need both.
     STATLESS_HOST / STATLESS_PORT  Bind address for the `statless` entrypoint
                    (namespaced to avoid colliding with shell/CI HOST & PORT; defaults 0.0.0.0 / 8000)
     STATS_TOKEN    When set (non-empty), GET /stats requires ?token=<value>.
-                   Empty (default) keeps stats public — the embed badge links to them.
+                   Empty (default) keeps stats public - the embed badge links to them.
     RETENTION_DAYS Delete events older than this many days (default: 180).
-                   0 disables automatic deletion (data is kept indefinitely —
+                   0 disables automatic deletion (data is kept indefinitely -
                    you then own the GDPR storage-limitation duty yourself).
 """
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import Field, NonNegativeInt
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, NonNegativeInt, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Apex domains matter: *.notion.so never matches https://notion.so itself.
+DEFAULT_EMBED_ORIGINS: tuple[str, ...] = (
+    "https://notion.so",
+    "https://*.notion.so",
+    "https://notion.site",
+    "https://*.notion.site",
+)
+# https origin, optional port; subdomain wildcard must be a full leading label.
+# A leading '*.' wildcard never matches the apex domain - list both when you need both.
+EMBED_ORIGIN_RE = re.compile(
+    r"^https://(\*\.)?[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)*(:\d{1,5})?$"
+)
 
 
 class Settings(BaseSettings):
@@ -42,8 +60,33 @@ class Settings(BaseSettings):
     rate_limit: int = Field(default=120, ge=0)
     stats_token: str = ""
     retention_days: NonNegativeInt = 180
+    embed_allowed_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_EMBED_ORIGINS)
+    )
     host: str = Field(default="0.0.0.0", validation_alias="STATLESS_HOST")
     port: int = Field(default=8000, ge=1, le=65535, validation_alias="STATLESS_PORT")
+
+    @field_validator("embed_allowed_origins", mode="before")
+    @classmethod
+    def _split_embed_origins(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("embed_allowed_origins", mode="after")
+    @classmethod
+    def _validate_embed_origins(cls, value: list[str]) -> list[str]:
+        deduped: list[str] = []
+        for origin in value:
+            if origin in deduped:
+                continue
+            if not EMBED_ORIGIN_RE.match(origin):
+                raise ValueError(
+                    f"invalid embed origin {origin!r}: use an https origin like "
+                    "https://example.com; a leading '*.' wildcard never matches the apex"
+                )
+            deduped.append(origin)
+        return deduped
 
 
 @lru_cache

@@ -16,6 +16,8 @@ services:
       DATABASE_URL: sqlite+aiosqlite:///./data/statless.db
       BASE_URL: ${BASE_URL:-http://localhost:8000}
       SALT_ROTATE_HOURS: ${SALT_ROTATE_HOURS:-24}
+      # Allow other iframe-based tools to frame /embed (replaces the Notion defaults):
+      # EMBED_ALLOWED_ORIGINS: "https://docs.example.com,https://*.team.example.com"
     volumes:
       - ./data:/app/data
     restart: unless-stopped
