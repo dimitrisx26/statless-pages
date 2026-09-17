@@ -1,13 +1,13 @@
 """Async SQLite/PostgreSQL connection (SQLAlchemy 2.0 asyncio).
 
-Schema — single ``events`` table keeps the standalone story simple:
+Schema - single ``events`` table keeps the standalone story simple:
 
     id            INTEGER PK
     doc_key       TEXT indexed      (your Notion / Substack / README slug)
     ts            TIMESTAMPTZ       (UTC)
-    ip_hash       TEXT              (HMAC-SHA256 w/ rotating salt — never a raw IP)
+    ip_hash       TEXT              (HMAC-SHA256 w/ rotating salt - never a raw IP)
     country       CHAR(2)           (GeoIP2 ISO code, "XX" unknown)
-    referrer      TEXT              (approved tag, or URL origin-only — never a query string)
+    referrer      TEXT              (approved tag, or URL origin-only - never a query string)
     ua            TEXT              (User-Agent, truncated to 512 chars)
     kind          TEXT              ("view" | "heartbeat")
     dwell_seconds INT nullable      (15/30/60/120 for heartbeats, NULL for views)
@@ -96,7 +96,7 @@ async def delete_old_events(retention_days: int) -> int:
     """Delete events older than `retention_days`; return the number deleted.
 
     GDPR storage-limitation (Art. 5(1)(e)): with RETENTION_DAYS > 0 (default
-    180) the lifespan loop prunes daily. 0 disables automatic deletion —
+    180) the lifespan loop prunes daily. 0 disables automatic deletion -
     you then own the storage-limitation duty yourself.
     """
     if retention_days <= 0:
@@ -125,7 +125,7 @@ def _truncate(value: str, limit: int) -> str:
 _REFERRER_MAX = 2048
 _UA_MAX = 512
 _TAG_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-# Group 1: scheme:// — group 2: host. An optional userinfo@ segment is matched
+# Group 1: scheme:// - group 2: host. An optional userinfo@ segment is matched
 # but never captured, so credentials in Referer headers are never stored.
 _ORIGIN_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*://)(?:[^@/?#\\]+@)?([^/?#\\]+)")
 
@@ -137,6 +137,32 @@ def _normalize_referrer(value: str) -> str:
         return value
     m = _ORIGIN_RE.match(value)
     return (m.group(1) + m.group(2)) if m else ""
+
+
+# Coarse UA-family labels (not fingerprints). Order matters: Chromium UAs
+# embed "Safari", so mobile OS tokens first, then Edge/Chrome/Firefox/Safari.
+_DEVICE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("mobile-safari", ("iphone",)),
+    ("mobile-safari", ("ipad",)),
+    ("mobile-safari", ("ipod",)),
+    ("mobile-chrome", ("android",)),
+    ("mobile-safari", ("mobile/",)),
+    ("mobile-chrome", ("mobile", "chrome/")),
+    ("desktop-edge", ("edg/",)),
+    ("desktop-chrome", ("chrome/",)),
+    ("desktop-firefox", ("firefox/",)),
+    ("desktop-safari", ("safari/",)),
+    ("desktop-other", ("linux", "windows", "macintosh")),
+)
+
+
+def classify_device(ua: str) -> str:
+    """Map a User-Agent to a coarse family label (mobile/desktop × browser family)."""
+    lowered = (ua or "").lower()
+    for label, tokens in _DEVICE_RULES:
+        if all(token in lowered for token in tokens):
+            return label
+    return "other"
 
 
 async def log_event(
@@ -179,9 +205,9 @@ async def get_view_count(doc_key: str) -> int:
 
 
 async def get_stats(doc_key: str) -> dict:
-    """Aggregate counts for a doc: views, uniques, heartbeats, top countries/referrers.
+    """Aggregate counts for a doc: totals, dwell, daily time-series, top countries/referrers.
 
-    One conditional-aggregation query for totals, then three GROUP BYs.
+    One conditional-aggregation query for totals, then four GROUP BYs.
     """
     assert _session_factory is not None, "call init_db() first"
     async with _session_factory() as session:
@@ -219,12 +245,52 @@ async def get_stats(doc_key: str) -> dict:
                 .limit(10)
             )
         ).all()
+        daily_rows = (
+            await session.execute(
+                select(
+                    func.date(Event.ts).label("day"),
+                    Event.kind,
+                    Event.dwell_seconds,
+                    func.count().label("n"),
+                    func.count(distinct(Event.ip_hash)).label("uniq"),
+                )
+                .where(Event.doc_key == doc_key)
+                .group_by(func.date(Event.ts), Event.kind, Event.dwell_seconds)
+            )
+        ).all()
+
+        daily: dict[str, dict] = {}
+        for day, kind, dwell, n, uniq in daily_rows:
+            day_bucket = daily.setdefault(str(day), {"views": 0, "uniques": 0, "heartbeats": {}})
+            if kind == "view":
+                day_bucket["views"] += n
+                day_bucket["uniques"] = max(day_bucket["uniques"], uniq)
+            else:
+                day_bucket["heartbeats"][str(dwell or 0)] = n
+
+        devices = (
+            await session.execute(
+                select(Event.ua, func.count())
+                .where(Event.doc_key == doc_key, Event.kind == "view")
+                .group_by(Event.ua)
+                .order_by(func.count().desc())
+                .limit(200)
+            )
+        ).all()
+        device_counts: dict[str, int] = {}
+        for ua, n in devices:
+            label = classify_device(ua)
+            device_counts[label] = device_counts.get(label, 0) + n
+        device_list = sorted(device_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
     return {
         "doc": doc_key,
         "events": total,
         "views": int(views or 0),
         "uniques": uniques,
         "dwell": {str(d or 0): c for d, c in heartbeats},
+        "daily": daily,
         "countries": [{"country": c, "count": n} for c, n in countries],
         "referrers": [{"referrer": r, "count": n} for r, n in referrers],
+        "devices": [{"device": label, "count": n} for label, n in device_list],
     }
