@@ -15,6 +15,9 @@ All settings are overridable via environment variables:
                    (namespaced to avoid colliding with shell/CI HOST & PORT; defaults 0.0.0.0 / 8000)
     STATS_TOKEN    When set (non-empty), GET /stats requires ?token=<value>.
                    Empty (default) keeps stats public — the embed badge links to them.
+    RETENTION_DAYS Delete events older than this many days (default: 180).
+                   0 disables automatic deletion (data is kept indefinitely —
+                   you then own the GDPR storage-limitation duty yourself).
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, NonNegativeInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +41,7 @@ class Settings(BaseSettings):
     trust_proxy: bool = False
     rate_limit: int = Field(default=120, ge=0)
     stats_token: str = ""
+    retention_days: NonNegativeInt = 180
     host: str = Field(default="0.0.0.0", validation_alias="STATLESS_HOST")
     port: int = Field(default=8000, ge=1, le=65535, validation_alias="STATLESS_PORT")
 

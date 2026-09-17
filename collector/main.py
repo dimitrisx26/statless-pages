@@ -11,6 +11,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 import re
@@ -53,11 +54,18 @@ def _no_store(resp: Response) -> Response:
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
     resp.headers["X-Content-Type-Options"] = "nosniff"
+    # Keep crawler traffic (which fetches pixel/badge/embed URLs) out of both
+    # search indexes and your view counts.
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
     return resp
 
 
 def _valid_doc(doc_key: str) -> bool:
     return bool(DOC_KEY_RE.match(doc_key))
+
+
+def _tracking_allowed(request: Request) -> bool:
+    return not any(request.headers.get(header, "").strip() == "1" for header in ("dnt", "sec-gpc"))
 
 
 def _socket_ip(request: Request) -> str:
@@ -155,7 +163,24 @@ async def lifespan(app: FastAPI):
     await db.init_db()
     salt.start_rotation_loop()
     get_geo()  # warm the in-RAM reader
+    retention = get_settings().retention_days
+
+    async def retention_loop() -> None:
+        if retention <= 0:
+            return
+        while True:
+            deleted = await db.delete_old_events(retention)
+            if deleted:
+                log.info("retention: deleted %d events older than %d days", deleted, retention)
+            await asyncio.sleep(86_400)
+
+    task = asyncio.create_task(retention_loop())
     yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
     await salt.stop_rotation_loop()
     get_geo().close()
     await db.close_db()
@@ -246,6 +271,85 @@ async def healthz() -> dict:
     return {"ok": True}
 
 
+PRIVACY_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>statless-pages · privacy</title>
+<style>
+body{font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Helvetica,Arial,sans-serif;
+ max-width:44em;margin:0 auto;padding:2rem 1rem;color:#37352f;background:#ffffff}
+h1{font-size:1.5rem}h2{font-size:1.1rem;margin-top:2em}
+code{background:#f1f1ef;padding:0.15em 0.4em;border-radius:4px;font-size:0.9em}
+table{border-collapse:collapse;width:100%}
+th,td{border:1px solid #e3e2e0;padding:0.4em 0.6em;text-align:left;font-size:0.9em}
+</style>
+</head>
+<body>
+<h1>Privacy — what this collector stores (and what it never stores)</h1>
+<p>This service counts page views and reading time for Notion pages, newsletters,
+and README files. It sets <strong>no cookies</strong>, uses no ETags, and does no
+fingerprinting. This page describes the data this collector itself processes;
+the operator of this deployment is the controller for it.</p>
+
+<h2>What is stored per event</h2>
+<table>
+<tr><th>Field</th><th>Content</th><th>Purpose</th></tr>
+<tr><td><code>doc_key</code></td><td>The slug you chose (e.g. <code>q3-roadmap</code>)</td><td>Which page was viewed</td></tr>
+<tr><td><code>ts</code></td><td>UTC timestamp</td><td>When</td></tr>
+<tr><td><code>ip_hash</code></td><td>HMAC-SHA256(IP, salt)[:32], salt RAM-only, rotated every
+SALT_ROTATE_HOURS (default 24h). Raw IPs are never written to disk.</td><td>Approximate unique counts</td></tr>
+<tr><td><code>country</code></td><td>2-letter ISO country from GeoLite2 (or <code>XX</code> unknown)</td><td>Coarse geography only</td></tr>
+<tr><td><code>referrer</code></td><td>Either an approved <code>?ref=</code> tag or <code>scheme://host</code> only —
+query strings and userinfo are stripped</td><td>Where readers came from</td></tr>
+<tr><td><code>ua</code></td><td>User-Agent, truncated to 512 chars</td><td>Approximate client stats</td></tr>
+<tr><td><code>dwell_seconds</code></td><td>One of 15/30/60/120 (heartbeats only)</td><td>Reading depth</td></tr>
+</table>
+
+<h2>Never stored</h2>
+<p>Raw IP addresses. Cookies or device identifiers. Query strings or paths from
+referrers. Scroll, click, or input telemetry. Heartbeat payloads beyond the
+4-value bucket <code>{"t": 15|30|60|120}</code>.</p>
+
+<h2>Retention</h2>
+<p>Events older than <code>RETENTION_DAYS</code> (default 180) are deleted
+automatically. <code>RETENTION_DAYS=0</code> disables automatic deletion — the
+operator then carries the storage-limitation duty themselves.</p>
+
+<h2>Opt-out</h2>
+<p>Requests carrying <code>DNT: 1</code> or <code>Sec-GPC: 1</code> are not
+recorded (nothing is logged for them, not even the visit).</p>
+
+<h2>Erasure</h2>
+<p>Because this tracker is cookie-free and stores only salted, rotating IP
+hashes, it generally cannot re-identify a person to fulfill an individual
+erasure request. Operators can hard-delete all events for a given
+<code>doc_key</code> with <code>db.purge_doc()</code>, and daily retention
+pruning bounds all stored data automatically.</p>
+
+<h2>Legal position (not legal advice)</h2>
+<p>Cookie-free, no-identifier tracking with rotating pseudonymised IPs is
+commonly run on legitimate interests (GDPR Art. 6(1)(f)); pseudonymised IP
+hashes remain personal data under GDPR (EDPB Guidelines 01/2025). Whether any
+particular deployment needs a consent banner depends on the operator's
+documented legitimate-interest assessment and on national ePrivacy
+interpretations (notably DE/FR). Operators embedding this tracker in EU-facing
+pages should publish this page, name a contact, and record a DPIA/legitimate-
+interest assessment. UK GDPR/PECR and US state privacy laws (e.g. CCPA/CPRA
+"sale/share" and universal opt-out signals like GPC) have separate,
+operator-specific requirements — this software implements the technical
+signals (DNT/Sec-GPC honoring, no cookies, origin-only referrers, bounded
+retention), but compliance decisions rest with the operator.</p>
+</body>
+</html>"""
+
+
+@app.get("/privacy", include_in_schema=False)
+async def privacy() -> Response:
+    return _no_store(HTMLResponse(PRIVACY_HTML))
+
+
 @app.get("/", include_in_schema=False)
 async def index() -> JSONResponse:
     s = get_settings()
@@ -269,7 +373,7 @@ async def pixel(doc_key: str, request: Request, background: BackgroundTasks, ref
     if not _valid_doc(doc_key):
         return _no_store(Response("invalid doc key", status_code=400, media_type="text/plain"))
     # Over-limit views are silently dropped: an <img> can't render a 429.
-    if _limiter.allow(_socket_ip(request)):
+    if _tracking_allowed(request) and _limiter.allow(_socket_ip(request)):
         background.add_task(_record_view, doc_key, request, ref)
     return _no_store(Response(PIXEL_SVG, media_type="image/svg+xml"))
 
@@ -278,7 +382,7 @@ async def pixel(doc_key: str, request: Request, background: BackgroundTasks, ref
 async def embed(doc_key: str, request: Request, background: BackgroundTasks) -> Response:
     if not _valid_doc(doc_key):
         return _no_store(Response("invalid doc key", status_code=400, media_type="text/plain"))
-    if _limiter.allow(_socket_ip(request)):
+    if _tracking_allowed(request) and _limiter.allow(_socket_ip(request)):
         background.add_task(_record_view, doc_key, request)
     try:
         views: int = await db.get_view_count(doc_key)
@@ -301,6 +405,8 @@ class Heartbeat(BaseModel):
 async def heartbeat(doc_key: str, beat: Heartbeat, request: Request) -> JSONResponse:
     if not _valid_doc(doc_key):
         return _no_store(JSONResponse({"ok": False, "error": "invalid doc key"}, status_code=400))
+    if not _tracking_allowed(request):
+        return _no_store(JSONResponse({"ok": True, "tracked": False}))
     if not _limiter.allow(_socket_ip(request)):
         return _no_store(JSONResponse({"ok": False, "error": "rate limited"}, status_code=429))
     ip_hash, country = _identity(request)

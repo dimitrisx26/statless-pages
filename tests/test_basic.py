@@ -218,6 +218,23 @@ async def test_422_carries_no_store(client):
     assert r.headers["Cache-Control"].startswith("no-store")
 
 
+@pytest.mark.parametrize("header", ["DNT", "Sec-GPC"])
+async def test_privacy_signal_skips_ingestion(client, monkeypatch, header):
+    from collector import database, main
+
+    def unexpected_identity(_request):
+        pytest.fail("Opted-out requests must not resolve an identity")
+
+    monkeypatch.setattr(main, "_identity", unexpected_identity)
+    headers = {header: "1"}
+    assert (await client.get("/pixel/private.svg", headers=headers)).status_code == 200
+    assert (await client.get("/embed/private", headers=headers)).status_code == 200
+    response = await client.post("/heartbeat/private", json={"t": 15}, headers=headers)
+    assert response.json() == {"ok": True, "tracked": False}
+    assert (await database.get_stats("private"))["events"] == 0
+    assert main._limiter._hits == {}
+
+
 async def test_stats_token_gate(client, monkeypatch):
     from collector.config import get_settings
 
@@ -229,3 +246,50 @@ async def test_stats_token_gate(client, monkeypatch):
         assert (await client.get("/stats/my-doc?token=shh")).status_code == 200
     finally:
         get_settings.cache_clear()
+
+
+async def test_retention_deletes_old_events_only(client):
+    from datetime import UTC, datetime, timedelta
+
+    from collector import database
+
+    await database.log_event(doc_key="old-doc", ip_hash="a" * 32)
+    await database.log_event(doc_key="new-doc", ip_hash="b" * 32)
+    async with database.get_engine().begin() as conn:
+        old_cutoff = datetime.now(UTC) - timedelta(days=200)
+        await conn.execute(
+            database.Event.__table__.update().where(database.Event.doc_key == "old-doc")
+            .values(ts=old_cutoff)
+        )
+    deleted = await database.delete_old_events(180)
+    assert deleted == 1
+    stats = await database.get_stats("new-doc")
+    assert stats["events"] == 1
+    assert (await database.get_stats("old-doc"))["events"] == 0
+
+
+async def test_retention_zero_disables(client):
+    from collector import database
+
+    await database.log_event(doc_key="keep-doc", ip_hash="c" * 32)
+    assert await database.delete_old_events(0) == 0
+    assert (await database.get_stats("keep-doc"))["events"] == 1
+
+
+async def test_purge_doc_erases_all_events_for_key(client):
+    from collector import database
+
+    await database.log_event(doc_key="erase-me", ip_hash="d" * 32)
+    await database.log_event(doc_key="erase-me", ip_hash="e" * 32, kind="heartbeat", dwell_seconds=15)
+    await database.log_event(doc_key="keep-me", ip_hash="f" * 32)
+    deleted = await database.purge_doc("erase-me")
+    assert deleted == 2
+    assert (await database.get_stats("erase-me"))["events"] == 0
+    assert (await database.get_stats("keep-me"))["events"] == 1
+
+
+def test_retention_days_rejects_negative(monkeypatch):
+    from collector.config import Settings
+
+    with pytest.raises(ValueError):
+        Settings(retention_days=-1)

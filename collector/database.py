@@ -19,9 +19,9 @@ SQLite is the default (zero-config single file). Point ``DATABASE_URL`` at
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import DateTime, Index, Integer, String, case, distinct, func, select
+from sqlalchemy import DateTime, Index, Integer, String, case, delete, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -90,6 +90,32 @@ async def close_db() -> None:
         await _engine.dispose()
     _engine = None
     _session_factory = None
+
+
+async def delete_old_events(retention_days: int) -> int:
+    """Delete events older than `retention_days`; return the number deleted.
+
+    GDPR storage-limitation (Art. 5(1)(e)): with RETENTION_DAYS > 0 (default
+    180) the lifespan loop prunes daily. 0 disables automatic deletion —
+    you then own the storage-limitation duty yourself.
+    """
+    if retention_days <= 0:
+        return 0
+    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+    assert _session_factory is not None, "call init_db() first"
+    async with _session_factory() as session:
+        result = await session.execute(delete(Event).where(Event.ts < cutoff))
+        await session.commit()
+        return int(result.rowcount or 0)
+
+
+async def purge_doc(doc_key: str) -> int:
+    """Hard-delete all events for one doc_key (Art. 17 erasure helper)."""
+    assert _session_factory is not None, "call init_db() first"
+    async with _session_factory() as session:
+        result = await session.execute(delete(Event).where(Event.doc_key == doc_key))
+        await session.commit()
+        return int(result.rowcount or 0)
 
 
 def _truncate(value: str, limit: int) -> str:
