@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 import re
 import time
@@ -143,6 +144,7 @@ async def _record_event(
     kind: str,
     ref: str = "",
     dwell_seconds: int | None = None,
+    dedupe_minutes: int = 0,
 ) -> None:
     """One ingest path for views and heartbeats; failures never propagate."""
     ip_hash, country = _identity(request)
@@ -155,6 +157,7 @@ async def _record_event(
             ua=request.headers.get("user-agent", "") or "",
             kind=kind,
             dwell_seconds=dwell_seconds,
+            dedupe_minutes=dedupe_minutes,
         )
     except Exception:  # ingest must never break pixel responses
         log.debug("%s ingest failed for %s", kind, doc_key, exc_info=True)
@@ -302,8 +305,14 @@ async def pixel(doc_key: str, request: Request, background: BackgroundTasks, ref
         return _invalid_doc_error()
     # Over-limit views are silently dropped: an <img> can't render a 429.
     if _tracking_allowed(request) and _limiter.allow(_socket_ip(request)):
-        background.add_task(_record_event, doc_key, request, "view", ref)
+        background.add_task(_record_view, doc_key, request, ref)
     return _no_store(Response(PIXEL_SVG, media_type="image/svg+xml"))
+
+
+async def _record_view(doc_key: str, request: Request, ref: str = "") -> None:
+    await _record_event(
+        doc_key, request, "view", ref=ref, dedupe_minutes=get_settings().view_dedupe_minutes
+    )
 
 
 async def _view_count_safe(doc_key: str) -> int:
@@ -315,16 +324,24 @@ async def _view_count_safe(doc_key: str) -> int:
 
 
 @app.get("/embed/{doc_key}", response_class=HTMLResponse)
-async def embed(doc_key: str, request: Request, background: BackgroundTasks) -> Response:
+async def embed(
+    doc_key: str, request: Request, background: BackgroundTasks, theme: str = ""
+) -> Response:
     if not _valid_doc(doc_key):
         return _invalid_doc_error()
     if _tracking_allowed(request) and _limiter.allow(_socket_ip(request)):
         background.add_task(_record_event, doc_key, request, "view")
     views = await _view_count_safe(doc_key)
+    forced = theme if theme in ("light", "dark") else ""  # empty = follow the OS
     resp = TEMPLATES.TemplateResponse(
         request,
         "embed.html",
-        {"doc_key": doc_key, "views": views, "base_url": get_settings().base_url.rstrip("/")},
+        {
+            "doc_key": doc_key,
+            "views": views,
+            "base_url": get_settings().base_url.rstrip("/"),
+            "theme": forced,
+        },
     )
     resp.headers["Content-Security-Policy"] = _embed_csp()
     return _no_store(resp)
@@ -361,37 +378,111 @@ async def heartbeat(doc_key: str, beat: Heartbeat, request: Request) -> JSONResp
     return _no_store(JSONResponse({"ok": True, "t": beat.t}))
 
 
+_COLOR_RE = re.compile(r"^[0-9A-Fa-f]{6}$")
+_LABEL_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,32}$")
+
+
+def _pct_encode(value: str) -> str:
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 @app.get("/badge/{doc_key}.svg", include_in_schema=False)
-async def badge(doc_key: str) -> Response:
+async def badge(doc_key: str, label: str = "", labelColor: str = "", color: str = "") -> Response:
     if not _valid_doc(doc_key):
         return _invalid_doc_error()
     views = await _view_count_safe(doc_key)
-    label = f"{views} views" if views != 1 else "1 view"
-    w = 8 * len(label) + 28
+    text = label if _LABEL_RE.match(label) else f"{views} views" if views != 1 else "1 view"
+    if label and not _LABEL_RE.match(label):
+        return _no_store(Response("bad label", status_code=400, media_type="text/plain"))
+    for c in (labelColor, color):
+        if c and not _COLOR_RE.match(c):
+            # SVG attributes are the only output here; ASCII hex keeps it that way.
+            return _no_store(Response("bad color", status_code=400, media_type="text/plain"))
+    bg = f"#{labelColor}" if labelColor else "#f1f1ef"
+    w = 8 * len(text) + 28
     svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="20" role="img" aria-label="{label}">'
-        f'<rect width="{w}" height="20" rx="10" fill="#f1f1ef"/>'
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="20" role="img" '
+        f'aria-label="{_pct_encode(text)}">'
+        f'<rect width="{w}" height="20" rx="10" fill="{bg}"/>'
         f'<circle cx="10" cy="10" r="3.5" fill="#46a758"/>'
         f'<text x="18" y="14" font-family="Inter,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" '
-        f'font-size="11" fill="#37352f">{label}</text></svg>'
+        f'font-size="11" fill="#{color if color else "37352f"}">{_pct_encode(text)}</text></svg>'
     )
     return _no_store(Response(svg, media_type="image/svg+xml"))
 
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _parse_date(value: str) -> str | None:
+    """Return the value when it is a sane YYYY-MM-DD, else None."""
+    if not _DATE_RE.match(value):
+        return None
+    from datetime import date
+
+    try:
+        return value if date.fromisoformat(value) else None
+    except ValueError:
+        return None
+
+
 @app.get("/stats/{doc_key}")
-async def stats(doc_key: str, token: str = "") -> JSONResponse:
+async def stats(doc_key: str, token: str = "", since: str = "", to: str = "") -> JSONResponse:
     if not _valid_doc(doc_key):
         return _no_store(JSONResponse({"ok": False, "error": "invalid doc key"}, status_code=400))
+    if since and not _parse_date(since):
+        return _no_store(JSONResponse({"ok": False, "error": "bad since date"}, status_code=400))
+    if to and not _parse_date(to):
+        return _no_store(JSONResponse({"ok": False, "error": "bad to date"}, status_code=400))
+    parsed_since, parsed_to = _parse_date(since) or "", _parse_date(to) or ""
+    if parsed_since and parsed_to and parsed_since > parsed_to:
+        return _no_store(JSONResponse({"ok": False, "error": "since after to"}, status_code=400))
     expected = get_settings().stats_token
     if expected and not hmac.compare_digest(token, expected):
         # Gated only when STATS_TOKEN is set; default (empty) keeps stats public.
         return _no_store(JSONResponse({"ok": False, "error": "forbidden"}, status_code=403))
     try:
-        data = await db.get_stats(doc_key)
+        data = await db.get_stats(doc_key, since=parsed_since or None, to=parsed_to or None)
     except SQLAlchemyError:
         log.exception("stats failed for %s", doc_key)
         return _no_store(JSONResponse({"ok": False, "error": "stats unavailable"}, status_code=500))
     return _no_store(JSONResponse(data))
+
+
+@app.get("/export/{doc_key}", include_in_schema=False)
+async def export(doc_key: str, token: str = "") -> Response:
+    if not _valid_doc(doc_key):
+        return _no_store(JSONResponse({"ok": False, "error": "invalid doc key"}, status_code=400))
+    expected = get_settings().stats_token
+    if expected and not hmac.compare_digest(token, expected):
+        return _no_store(JSONResponse({"ok": False, "error": "forbidden"}, status_code=403))
+    try:
+        rows = await db.get_export(doc_key)
+    except SQLAlchemyError:
+        log.exception("export failed for %s", doc_key)
+        return _no_store(JSONResponse({"ok": False, "error": "export unavailable"}, status_code=500))
+    body = "\n".join(json.dumps(row, separators=(",", ":")) for row in rows) + ("\n" if rows else "")
+    resp = _no_store(Response(body, media_type="application/x-ndjson"))
+    resp.headers["Content-Disposition"] = f'attachment; filename="{doc_key}.ndjson"'
+    return resp
+
+
+@app.get("/robots.txt", include_in_schema=False)
+async def robots() -> Response:
+    body = "User-agent: *\nDisallow: /\n"
+    return _no_store(Response(body, media_type="text/plain"))
+
+
+@app.get("/.well-known/security.txt", include_in_schema=False)
+async def security_txt() -> Response:
+    body = (
+        "Contact: mailto:security@YOUR-DOMAIN.example\n"
+        "Preferred-Languages: en\n"
+        "Policy: https://YOUR-DOMAIN.example/.well-known/security.txt\n"
+    )
+    resp = _no_store(Response(body, media_type="text/plain; charset=utf-8"))
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
 
 
 def run() -> None:  # `statless` entrypoint

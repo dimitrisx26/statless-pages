@@ -21,6 +21,11 @@ All settings are overridable via environment variables:
     RETENTION_DAYS Delete events older than this many days (default: 180).
                    0 disables automatic deletion (data is kept indefinitely -
                    you then own the GDPR storage-limitation duty yourself).
+    VIEW_DEDUPE_MINUTES  Collapse repeated views of the same page by the same
+                   IP-hash within the window (default: 0 = every fetch counts).
+    SERVER_SECRET  Optional. When set, the IP-hash salt is derived deterministically
+                   (HMAC of the UTC date), so uniques survive restarts and can be
+                   reproduced across replicas sharing the secret.
 """
 
 from __future__ import annotations
@@ -60,6 +65,8 @@ class Settings(BaseSettings):
     rate_limit: int = Field(default=120, ge=0)
     stats_token: str = ""
     retention_days: NonNegativeInt = 180
+    view_dedupe_minutes: NonNegativeInt = 0
+    server_secret: str = ""
     embed_allowed_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: list(DEFAULT_EMBED_ORIGINS)
     )

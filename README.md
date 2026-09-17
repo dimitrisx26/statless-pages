@@ -188,11 +188,13 @@ curl http://localhost:8000/stats/q3-roadmap
 | Method | Route | Notes |
 |---|---|---|
 | `GET` | `/pixel/{doc_key}.svg` | 1×1 transparent SVG. `Cache-Control: no-store …`, `Pragma: no-cache`, `Expires: 0`, `X-Robots-Tag: noindex, nofollow` |
-| `GET` | `/embed/{doc_key}` | ~2.8KB HTML embed widget (badge + dwell heartbeats). `CSP: frame-ancestors` allow-list (Notion domains by default; configurable via `EMBED_ALLOWED_ORIGINS`). Works in Notion out of the box; anywhere else you control once allowed |
+| `GET` | `/embed/{doc_key}` | ~2.8KB HTML embed widget (badge + dwell heartbeats). Optional `?theme=light\|dark` forces a palette (default: follows the OS). `CSP: frame-ancestors` allow-list (Notion domains by default; configurable via `EMBED_ALLOWED_ORIGINS`) |
 | `POST` | `/heartbeat/{doc_key}` | JSON `{"t": 15\|30\|60\|120}` via `navigator.sendBeacon`. Bodies > 4 KB get `413`; `429` past the rate limit |
-| `GET` | `/badge/{doc_key}.svg` | Counter badge for READMEs. Display-only: does not record views; pair with a pixel if you want fetches counted |
-| `GET` | `/stats/{doc_key}` | JSON: views, uniques, daily time-series, dwell buckets, top countries/referrers/devices. **Public by default** - set `STATS_TOKEN` to require `?token=...` |
+| `GET` | `/badge/{doc_key}.svg` | Counter badge for READMEs. Display-only: does not record views; pair with a pixel if you want fetches counted. Customize with `?label=` (up to 40 chars, `[A-Za-z0-9 _.-]`), `?labelColor=RRGGBB`, `?color=RRGGBB` |
+| `GET` | `/stats/{doc_key}` | JSON: views, uniques, daily time-series, dwell buckets, top countries/referrers/devices. **Public by default** - set `STATS_TOKEN` to require `?token=...`. Filter with `?since=YYYY-MM-DD&to=YYYY-MM-DD` (inclusive UTC dates) |
+| `GET` | `/export/{doc_key}` | NDJSON dump of all raw event rows for one doc (oldest first; same `STATS_TOKEN` gate). Portable backup / GDPR Art. 15/20 data access |
 | `GET` | `/privacy` | Human-readable privacy notice: exactly what's stored, retention, opt-out, legal position |
+| `GET` | `/robots.txt`, `/.well-known/security.txt` | Crawler off-switch (`Disallow: /`) and a disclosure template. `/security.txt` ships "security@YOUR-DOMAIN.example" - replace it with your real contact |
 | `GET` | `/healthz` | Liveness probe |
 
 `doc_key` must match `^[A-Za-z0-9_-]{1,64}$`.
@@ -214,8 +216,10 @@ For local development, set these variables in the process environment. With Dock
 | `BASE_URL` | `http://localhost:8000` | Rendered into embed/badge snippets |
 | `TRUST_PROXY` | `false` | Honor `X-Forwarded-For` / `X-Real-IP` for IP **hashing/geo** only. Leave off unless behind a proxy that overwrites these headers - otherwise clients can spoof uniques. The rate limiter always uses the real socket IP, unaffected by this flag. |
 | `RATE_LIMIT` | `120` | Tracked events per minute per client (0 disables). Over-limit pixels are silently dropped; heartbeats get `429`. Keyed on the socket IP, so header spoofing can't evade it. |
-| `STATS_TOKEN` | *(empty = public)* | When set, `GET /stats` requires `?token=<value>` (returns `403` otherwise). Use your tokenized URL yourself - the embed badge links the plain URL, which 403s for everyone else. |
+| `STATS_TOKEN` | *(empty = public)* | When set, `GET /stats` and `GET /export` require `?token=<value>` (returns `403` otherwise). Use your tokenized URL yourself - the embed badge links the plain URL, which 403s for everyone else. |
 | `EMBED_ALLOWED_ORIGINS` | Notion apex + wildcard domains | Comma-separated `https` origins allowed to frame `/embed` (replaces the default list, which also covers the `notion.site` apex/wildcards). A leading `*.` wildcard never matches the apex domain - list both when you need both. `EMBED_ALLOWED_ORIGINS=""` sets `frame-ancestors 'none'` (blocks all framing). |
+| `VIEW_DEDUPE_MINUTES` | `0` (off) | Collapse repeated views of the same page by the same IP-hash within the window (double-loads/prefetches count once). Heartbeats and rate limiting are unaffected. |
+| `SERVER_SECRET` | *(empty = random)* | Derive salts from `HMAC(secret, date+window)` so uniques survive restarts and match across replicas. Keep the secret in your secret manager, never in the repo. |
 | `STATLESS_HOST` / `STATLESS_PORT` | `0.0.0.0` / `8000` | Bind for the `statless` entrypoint (namespaced so stray `HOST`/`PORT` env vars can't hijack them) |
 | `STATLESS_UID` / `STATLESS_GID` | `10001` | docker-compose only: run the container as your host user so the SQLite bind-mount is writable. On **Linux**: `STATLESS_UID=$(id -u) STATLESS_GID=$(id -g) docker compose up -d` |
 
@@ -266,6 +270,7 @@ Compliance depends on how *you* deploy and document it - this software provides 
 
 - **Automatic:** events older than `RETENTION_DAYS` (default 180) are deleted daily.
 - **Per-doc erasure:** call `await db.purge_doc("doc-key")` to hard-delete every event for one doc (GDPR Art. 17 helper).
+- **Full data access:** `GET /export/{doc_key}` returns one NDJSON row per stored event (subject-subject the same `STATS_TOKEN` gate) - use it for GDPR Art. 15/20 requests and backups.
 - **Individual erasure limits:** with a rotating salt and no identifiers, the collector generally cannot link stored events back to a person - say so plainly in your privacy notice.
 
 ---
@@ -274,12 +279,12 @@ Compliance depends on how *you* deploy and document it - this software provides 
 
 **Run a single worker.** The shipped `statless` entrypoint uses one process, and that's deliberate:
 
-- The IP-hash salt and the rate limiter live in process memory, so multiple workers would multiply uniques and rate limits independently (N workers ≈ N× uniques, N× rate limit).
+- The rate limiter lives in process memory, so multiple workers would multiply rate limits independently (N workers ≈ N× rate limit).
 - SQLite is single-writer - extra workers only contend on the write lock.
 
 One event loop easily serves thousands of pixel/heartbeat requests per second; the DB is the bottleneck, not Python.
 
-**If you outgrow it:** move to PostgreSQL, run N replicas, and delegate rate limiting to your proxy (e.g. nginx `limit_req`). Hashing across workers then requires a deterministic, date-based salt derived from a managed `SERVER_SECRET` - planned but not implemented; the current in-memory salt is single-process by design.
+**If you outgrow it:** move to PostgreSQL, run N replicas, and delegate rate limiting to your proxy (e.g. nginx `limit_req`). For uniques, set `SERVER_SECRET` - salts then derive deterministically from `HMAC(secret, date + window)` (`SALT_ROTATE_HOURS` controls the window), surviving restarts and matching across replicas sharing the secret. Keep the secret in your secret manager, never in the repo.
 
 ---
 

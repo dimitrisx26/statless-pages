@@ -30,13 +30,29 @@ def current_salt() -> str:
     return _salt
 
 
+def derive_ephemeral_salt(server_secret: str) -> str:
+    """Deterministic per-rotation-window salt for SERVER_SECRET deployments.
+
+    HMAC(server_secret, "YYYY-MM-DD:window-sequence") reproduces across
+    replicas, so uniques survive restarts and remain consistent behind a
+    load balancer. The secret never leaves process memory.
+    """
+    from datetime import UTC, datetime
+
+    window = get_settings().salt_rotate_hours
+    if window <= 0:
+        window = get_settings().salt_rotate_hours  # config validation prevents this
+    now = datetime.now(UTC)
+    window_index = int(now.timestamp() // (window * 3600.0))
+    message = f"{now:%Y-%m-%d}:{window_index}".encode()
+    return hmac.new(server_secret.encode(), message, hashlib.sha256).hexdigest()
+
+
 def rotate_salt() -> str:
     """Force-rotate the salt immediately. Returns the new salt."""
     global _salt
     _salt = secrets.token_hex(32)
     return _salt
-
-
 def hash_ip(ip: str, salt: str | None = None) -> str:
     """HMAC-SHA256 hash an IP address, truncated to 32 hex chars (128-bit).
 
@@ -53,13 +69,22 @@ async def _rotation_loop() -> None:
     interval = settings.salt_rotate_hours * 3600.0
     while True:
         await asyncio.sleep(interval)
-        rotate_salt()
+        if settings.server_secret:
+            # Secret-derived: the next call to current_salt() (via the loop
+            # below) recomputes deterministically; nothing to store.
+            _salt = None
+        else:
+            rotate_salt()
 
 
 def start_rotation_loop() -> None:
-    """Start the background daily-reset loop (idempotent). Call from lifespan."""
+    """Start the background salt-rotation loop (idempotent). Call from lifespan."""
     global _rotation_task
-    current_salt()  # ensure a salt exists before serving traffic
+    secret = get_settings().server_secret
+    if secret:
+        _salt = derive_ephemeral_salt(secret)
+    else:
+        current_salt()  # ensure a random salt exists before serving traffic
     if _rotation_task is None or _rotation_task.done():
         _rotation_task = asyncio.create_task(_rotation_loop())
 

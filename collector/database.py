@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import DateTime, Index, Integer, String, case, delete, distinct, func, select
+from sqlalchemy import DateTime, Index, Integer, String, and_, case, delete, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -173,9 +173,31 @@ async def log_event(
     ua: str = "",
     kind: str = "view",
     dwell_seconds: int | None = None,
+    dedupe_minutes: int = 0,
 ) -> None:
+    """Insert one tracked event; optionally skip duplicate recent views.
+
+    dedupe_minutes > 0 collapses repeated views of the same doc by the same
+    ip_hash within the window (rapid double-loads, prefetches) into one.
+    """
     assert _session_factory is not None, "call init_db() first"
     async with _session_factory() as session:
+        if dedupe_minutes > 0:
+            cutoff = datetime.now(UTC) - timedelta(minutes=dedupe_minutes)
+            shared = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(Event)
+                    .where(
+                        Event.doc_key == doc_key,
+                        Event.ip_hash == _truncate(ip_hash, 32),
+                        Event.kind == "view",
+                        Event.ts > cutoff,
+                    )
+                )
+            ).scalar()
+            if shared:
+                return
         session.add(
             Event(
                 doc_key=doc_key,
@@ -204,12 +226,70 @@ async def get_view_count(doc_key: str) -> int:
         ).scalar() or 0
 
 
-async def get_stats(doc_key: str) -> dict:
+async def count_events(doc_key: str) -> int:
+    """Total tracked events for one doc (test/debug helper)."""
+    assert _session_factory is not None, "call init_db() first"
+    async with _session_factory() as session:
+        return (
+            await session.execute(
+                select(func.count()).select_from(Event).where(Event.doc_key == doc_key)
+            )
+        ).scalar() or 0
+
+
+async def get_export(doc_key: str) -> list[dict]:
+    """Raw event rows for one doc, oldest first (JSONL export, Art. 15/20 access)."""
+    assert _session_factory is not None, "call init_db() first"
+    async with _session_factory() as session:
+        rows = (
+            await session.execute(
+                select(
+                    Event.ts,
+                    Event.doc_key,
+                    Event.ip_hash,
+                    Event.country,
+                    Event.referrer,
+                    Event.ua,
+                    Event.kind,
+                    Event.dwell_seconds,
+                )
+                .where(Event.doc_key == doc_key)
+                .order_by(Event.ts)
+            )
+        ).all()
+    return [
+        {
+            "ts": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+            "doc_key": doc,
+            "ip_hash": h,
+            "country": c,
+            "referrer": ref,
+            "ua": ua,
+            "kind": kind,
+            "dwell_seconds": dwell,
+        }
+        for ts, doc, h, c, ref, ua, kind, dwell in rows
+    ]
+
+
+async def get_stats(
+    doc_key: str,
+    since: str | None = None,
+    to: str | None = None,
+) -> dict:
     """Aggregate counts for a doc: totals, dwell, daily time-series, top countries/referrers.
 
+    since/to are inclusive UTC date bounds (YYYY-MM-DD), validated by the route.
     One conditional-aggregation query for totals, then four GROUP BYs.
     """
     assert _session_factory is not None, "call init_db() first"
+    conditions = [Event.doc_key == doc_key]
+    if since:
+        conditions.append(Event.ts >= datetime.fromisoformat(since).replace(tzinfo=UTC))
+    if to:
+        upper = datetime.fromisoformat(to).replace(tzinfo=UTC) + timedelta(days=1)
+        conditions.append(Event.ts < upper)
+    where = and_(*conditions)
     async with _session_factory() as session:
         total, views, uniques = (
             await session.execute(
@@ -217,20 +297,20 @@ async def get_stats(doc_key: str) -> dict:
                     func.count(),
                     func.sum(case((Event.kind == "view", 1), else_=0)),
                     func.count(distinct(Event.ip_hash)),
-                ).where(Event.doc_key == doc_key)
+                ).where(where)
             )
         ).one()
         heartbeats = (
             await session.execute(
                 select(Event.dwell_seconds, func.count())
-                .where(Event.doc_key == doc_key, Event.kind == "heartbeat")
+                .where(where, Event.kind == "heartbeat")
                 .group_by(Event.dwell_seconds)
             )
         ).all()
         countries = (
             await session.execute(
                 select(Event.country, func.count())
-                .where(Event.doc_key == doc_key)
+                .where(where)
                 .group_by(Event.country)
                 .order_by(func.count().desc())
                 .limit(10)
@@ -239,7 +319,7 @@ async def get_stats(doc_key: str) -> dict:
         referrers = (
             await session.execute(
                 select(Event.referrer, func.count())
-                .where(Event.doc_key == doc_key, Event.referrer != "")
+                .where(where, Event.referrer != "")
                 .group_by(Event.referrer)
                 .order_by(func.count().desc())
                 .limit(10)
@@ -254,7 +334,7 @@ async def get_stats(doc_key: str) -> dict:
                     func.count().label("n"),
                     func.count(distinct(Event.ip_hash)).label("uniq"),
                 )
-                .where(Event.doc_key == doc_key)
+                .where(where)
                 .group_by(func.date(Event.ts), Event.kind, Event.dwell_seconds)
             )
         ).all()
@@ -271,7 +351,7 @@ async def get_stats(doc_key: str) -> dict:
         devices = (
             await session.execute(
                 select(Event.ua, func.count())
-                .where(Event.doc_key == doc_key, Event.kind == "view")
+                .where(where, Event.kind == "view")
                 .group_by(Event.ua)
                 .order_by(func.count().desc())
                 .limit(200)

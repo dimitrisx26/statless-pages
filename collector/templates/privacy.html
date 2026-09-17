@@ -51,6 +51,11 @@ operator then carries the storage-limitation duty themselves.</p>
 <p>Requests carrying <code>DNT: 1</code> or <code>Sec-GPC: 1</code> are not
 recorded (nothing is logged for them, not even the visit).</p>
 
+<p>Rapid re-fetches of the same page (double-loads, prefetches) may be
+collapsed into one recorded view when the operator enables the dedupe window:
+the check compares only the salted IP hash and a short time window, and no new
+data is stored by it.</p>
+
 <h2>Erasure</h2>
 <p>Because this tracker is cookie-free and stores only salted, rotating IP
 hashes, it generally cannot re-identify a person to fulfill an individual

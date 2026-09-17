@@ -1,6 +1,7 @@
 """Smoke tests for the ingestion engine (SQLite per-test temp file)."""
 
 import asyncio
+import json
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -160,7 +161,7 @@ async def test_stats_error_does_not_leak_exception(client, monkeypatch):
 
     from collector import database
 
-    async def boom(_doc):
+    async def boom(_doc, since=None, to=None):
         raise SQLAlchemyError("host=db.internal user=secret")
 
     monkeypatch.setattr(database, "get_stats", boom)
@@ -385,3 +386,145 @@ def test_retention_days_rejects_negative(monkeypatch):
 
     with pytest.raises(ValueError):
         Settings(retention_days=-1)
+
+
+async def test_stats_date_range_filters(client):
+    from datetime import UTC, datetime, timedelta
+
+    from collector import database
+
+    await database.log_event(doc_key="range-doc", ip_hash="a" * 32)
+    async with database.get_engine().begin() as conn:
+        week_ago = datetime.now(UTC) - timedelta(days=7)
+        await conn.execute(
+            database.Event.__table__.update()
+            .where(database.Event.doc_key == "range-doc")
+            .values(ts=week_ago)
+        )
+    await database.log_event(doc_key="range-doc", ip_hash="b" * 32, kind="heartbeat", dwell_seconds=15)
+
+    data = (await client.get("/stats/range-doc")).json()
+    assert data["events"] == 2
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    week_ago_day = (datetime.now(UTC) - timedelta(days=7)).strftime("%Y-%m-%d")
+    assert data["daily"][today]["heartbeats"] == {"15": 1}
+    assert data["daily"][week_ago_day]["views"] == 1
+
+    since = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%d")
+    recent = (await client.get(f"/stats/range-doc?since={since}")).json()
+    assert recent["events"] == 1  # heartbeat only, old view excluded
+    assert recent["views"] == 0
+
+    to = (datetime.now(UTC) - timedelta(days=5)).strftime("%Y-%m-%d")
+    old = (await client.get(f"/stats/range-doc?to={to}")).json()
+    assert old["events"] == 1 and old["views"] == 1
+
+    both = (await client.get(f"/stats/range-doc?since={since}&to={to}"))
+    assert both.status_code == 400  # since after to is rejected up front
+
+
+async def test_stats_rejects_bad_date_filters(client):
+    assert (await client.get("/stats/my-doc?since=not-a-date")).status_code == 400
+    assert (await client.get("/stats/my-doc?since=2026-09-30&to=2026-09-01")).status_code == 400
+
+
+async def test_badge_custom_label_and_color(client):
+    r = await client.get("/badge/label-doc.svg?label=Testing&labelColor=6A5ACD&color=ABCDEF")
+    assert r.status_code == 200
+    svg = r.text
+    assert ">Testing" in svg or ">Testing<" in svg
+    assert "6A5ACD" in svg and "ABCDEF" in svg
+
+
+async def test_badge_rejects_bad_label_and_color(client):
+    r = await client.get("/badge/label-doc.svg?label=" + "x" * 40)
+    assert r.status_code == 400
+    assert (await client.get("/badge/label-doc.svg?color=zzz")).status_code == 400
+    assert (await client.get("/badge/label-doc.svg?color=red;fill=url(#x)")).status_code == 400
+
+
+async def test_embed_theme_param_override(client):
+    light = await client.get("/embed/theme-doc?theme=light")
+    dark = await client.get("/embed/theme-doc?theme=dark")
+    assert light.status_code == dark.status_code == 200
+    assert light.text != dark.text  # cascade values differ between forced themes
+    assert (await client.get("/embed/theme-doc?theme=weird")).status_code == 200
+
+
+async def test_robots_and_security_txt(client):
+    r = await client.get("/robots.txt")
+    assert r.status_code == 200
+    assert "Disallow: /" in r.text
+    assert "X-Robots-Tag" in r.headers
+    s = await client.get("/.well-known/security.txt")
+    assert s.status_code == 200
+    assert "Contact:" in s.text
+
+
+async def test_export_jsonl_gated_by_stats_token(client, monkeypatch):
+    from collector import database
+    from collector.config import get_settings
+
+    await database.log_event(doc_key="exp-doc", ip_hash="a" * 32)
+    await database.log_event(doc_key="exp-doc", ip_hash="b" * 32, kind="heartbeat", dwell_seconds=15)
+    await database.log_event(doc_key="other-doc", ip_hash="c" * 32)
+
+    monkeypatch.setenv("STATS_TOKEN", "shh")
+    get_settings.cache_clear()
+    try:
+        assert (await client.get("/export/exp-doc")).status_code == 403
+        r = await client.get("/export/exp-doc?token=shh")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("application/x-ndjson")
+        lines = [line for line in r.text.strip().splitlines() if line]
+        assert len(lines) == 2
+        rows = [json.loads(line) for line in lines]
+        assert {row["doc_key"] for row in rows} == {"exp-doc"}
+        assert "ip_hash" in rows[0] and "raw_ip" not in rows[0]
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_view_dedupe_window(client, monkeypatch):
+    from collector import database
+    from collector.config import get_settings
+
+    monkeypatch.setenv("VIEW_DEDUPE_MINUTES", "5")
+    get_settings.cache_clear()
+    try:
+        await client.get("/pixel/dedupe-doc.svg")  # background task may not run instantly
+        await client.get("/pixel/dedupe-doc.svg")
+        await client.get("/pixel/dedupe-doc.svg")
+        for _ in range(20):
+            if (await database.get_view_count("dedupe-doc")) == 1:
+                break
+            await asyncio.sleep(0.1)
+        assert (await database.get_view_count("dedupe-doc")) == 1
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_view_dedupe_disabled_by_default(client):
+    from collector import database
+
+    await client.get("/pixel/dedup2.svg")
+    await client.get("/pixel/dedup2.svg")
+    await client.get("/pixel/dedup2.svg")
+    for _ in range(20):
+        if (await database.count_events("dedup2")) == 3:
+            break
+        await asyncio.sleep(0.1)
+    assert (await database.count_events("dedup2")) == 3
+
+
+def test_secret_salt_is_deterministic_within_rotation_window(monkeypatch):
+    from collector import salt as salt_mod
+
+    s1 = salt_mod.derive_ephemeral_salt("topsecret")
+    s2 = salt_mod.derive_ephemeral_salt("topsecret")
+    assert s1 == s2  # stable within the current rotation window
+
+
+async def test_security_txt_and_robots_no_store(client):
+    r = await client.get("/robots.txt")
+    assert r.headers["Cache-Control"].startswith("no-store")

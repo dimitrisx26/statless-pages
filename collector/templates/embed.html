@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en"{% if theme %} data-theme="{{ theme }}"{% endif %}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -18,11 +18,16 @@ body{display:flex;align-items:center;justify-content:center;background:transpare
 .num{font-variant-numeric:tabular-nums;font-weight:600}
 .label{color:var(--muted)}
 .badge:hover{border-color:rgba(0,0,0,.14)}
+html[data-theme="dark"]{--fg:#e3e2e0;--muted:#979795;--pill:#2a2a2a}
+html[data-theme="dark"] .badge{border-color:rgba(255,255,255,.08)}
+html[data-theme="dark"] .badge:hover{border-color:rgba(255,255,255,.18)}
+html[data-theme="dark"] .dot{background:#46a758}
 @media (prefers-color-scheme:dark){
  :root{--fg:#e3e2e0;--muted:#979795;--pill:#2a2a2a}
  .badge{border-color:rgba(255,255,255,.08)}
  .badge:hover{border-color:rgba(255,255,255,.18)}
 }
+{% if theme %}html[data-theme="{{ theme }}"]{--fg:{% if theme == 'dark' %}#e3e2e0{% else %}#37352f{% endif %};--muted:{% if theme == 'dark' %}#979795{% else %}#787774{% endif %};--pill:{% if theme == 'dark' %}#2a2a2a{% else %}#f1f1ef{% endif %}}{% endif %}
 </style>
 </head>
 <body>
