@@ -23,10 +23,11 @@ _rotation_task: asyncio.Task[None] | None = None
 
 
 def current_salt() -> str:
-    """Return the active salt, generating one lazily on first use."""
+    """Return the active salt, deriving/generating one lazily on first use."""
     global _salt
     if _salt is None:
-        _salt = secrets.token_hex(32)
+        secret = get_settings().server_secret
+        _salt = derive_ephemeral_salt(secret) if secret else secrets.token_hex(32)
     return _salt
 
 
@@ -39,20 +40,26 @@ def derive_ephemeral_salt(server_secret: str) -> str:
     """
     from datetime import UTC, datetime
 
-    window = get_settings().salt_rotate_hours
-    if window <= 0:
-        window = get_settings().salt_rotate_hours  # config validation prevents this
+    window = get_settings().salt_rotate_hours  # config validation keeps this > 0
     now = datetime.now(UTC)
     window_index = int(now.timestamp() // (window * 3600.0))
     message = f"{now:%Y-%m-%d}:{window_index}".encode()
     return hmac.new(server_secret.encode(), message, hashlib.sha256).hexdigest()
 
 
+def _next_salt() -> None:
+    """Advance to the salt for a fresh window (random unless SERVER_SECRET)."""
+    global _salt
+    secret = get_settings().server_secret
+    _salt = derive_ephemeral_salt(secret) if secret else secrets.token_hex(32)
+
+
 def rotate_salt() -> str:
     """Force-rotate the salt immediately. Returns the new salt."""
-    global _salt
-    _salt = secrets.token_hex(32)
+    _next_salt()
     return _salt
+
+
 def hash_ip(ip: str, salt: str | None = None) -> str:
     """HMAC-SHA256 hash an IP address, truncated to 32 hex chars (128-bit).
 
@@ -65,26 +72,16 @@ def hash_ip(ip: str, salt: str | None = None) -> str:
 
 
 async def _rotation_loop() -> None:
-    settings = get_settings()
-    interval = settings.salt_rotate_hours * 3600.0
+    interval = get_settings().salt_rotate_hours * 3600.0
     while True:
         await asyncio.sleep(interval)
-        if settings.server_secret:
-            # Secret-derived: the next call to current_salt() (via the loop
-            # below) recomputes deterministically; nothing to store.
-            _salt = None
-        else:
-            rotate_salt()
+        _next_salt()
 
 
 def start_rotation_loop() -> None:
     """Start the background salt-rotation loop (idempotent). Call from lifespan."""
     global _rotation_task
-    secret = get_settings().server_secret
-    if secret:
-        _salt = derive_ephemeral_salt(secret)
-    else:
-        current_salt()  # ensure a random salt exists before serving traffic
+    _next_salt()  # ensure a salt exists before serving traffic
     if _rotation_task is None or _rotation_task.done():
         _rotation_task = asyncio.create_task(_rotation_loop())
 

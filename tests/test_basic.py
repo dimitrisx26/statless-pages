@@ -437,7 +437,7 @@ async def test_badge_custom_label_and_color(client):
 
 
 async def test_badge_rejects_bad_label_and_color(client):
-    r = await client.get("/badge/label-doc.svg?label=" + "x" * 40)
+    r = await client.get("/badge/label-doc.svg?label=" + "x" * 41)
     assert r.status_code == 400
     assert (await client.get("/badge/label-doc.svg?color=zzz")).status_code == 400
     assert (await client.get("/badge/label-doc.svg?color=red;fill=url(#x)")).status_code == 400
