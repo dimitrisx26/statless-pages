@@ -2,7 +2,7 @@
 
 Privacy model: client IPs are never stored. Each IP is HMAC-SHA256 hashed
 with an ephemeral in-memory salt that rotates every ``SALT_ROTATE_HOURS``
-(default 24h). After rotation, yesterday's hashes cannot be re-correlated —
+(default 24h). After rotation, yesterday's hashes cannot be re-correlated -
 uniques are approximate per-salt-window, which is the intended trade-off
 for a cookie-free tracker.
 
