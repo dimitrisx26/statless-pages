@@ -89,30 +89,35 @@ class RateLimiter:
     """Fixed-window counter per client, per minute. Single event loop, no locks."""
 
     def __init__(self, limit: int, max_ips: int = 10_000) -> None:
+        if max_ips < 1:
+            raise ValueError("max_ips must be positive")
         self.limit = limit
         self.max_ips = max_ips
         self._hits: dict[str, tuple[int, float]] = {}
-        self._last_sweep = 0.0
+        self._last_sweep = float("-inf")
 
     def allow(self, key: str) -> bool:
         if self.limit <= 0:
             return True
         now = time.monotonic()
+        if key not in self._hits and len(self._hits) >= self.max_ips:
+            if now - self._last_sweep >= 60.0:
+                self._last_sweep = now
+                cutoff = now - 60.0
+                self._hits = {k: v for k, v in self._hits.items() if v[1] > cutoff}
+            if len(self._hits) >= self.max_ips:
+                return False
         count, window_start = self._hits.get(key, (0, now))
         if now - window_start >= 60.0:
             count, window_start = 0, now
-        count += 1
-        self._hits[key] = (count, window_start)
-        # Bound memory under distributed flood; sweep at most once per window so the
-        # guard itself never becomes per-request O(n) work during the attack it guards.
-        if len(self._hits) > self.max_ips and now - self._last_sweep >= 60.0:
-            self._last_sweep = now
-            cutoff = now - 60.0
-            self._hits = {k: v for k, v in self._hits.items() if v[1] > cutoff}
-        return count <= self.limit
+        if count >= self.limit:
+            return False
+        self._hits[key] = (count + 1, window_start)
+        return True
 
     def reset(self) -> None:
         self._hits.clear()
+        self._last_sweep = float("-inf")
 
 
 _limiter = RateLimiter(get_settings().rate_limit)

@@ -177,6 +177,30 @@ async def test_rate_limit_blocks_flood(client):
     assert codes.count(429) == 3
 
 
+def test_rate_limiter_rejects_when_full_and_keeps_existing_keys():
+    # A flood of new IPs must not evict live buckets (that would reset limits),
+    # so once full, untracked keys are refused and the first client keeps its budget.
+    from collector.main import RateLimiter
+
+    limiter = RateLimiter(limit=2, max_ips=3)
+    assert [limiter.allow("a"), limiter.allow("a")] == [True, True]
+    assert [limiter.allow("b"), limiter.allow("c")] == [True, True]
+    assert limiter.allow("d") is False  # full: brand-new key rejected, not evicted in
+    assert limiter.allow("a") is False  # existing key still enforces its own limit
+    assert limiter.allow("a") is False
+
+
+def test_rate_limiter_respects_limit_zero_and_reset():
+    from collector.main import RateLimiter
+
+    unlimited = RateLimiter(limit=0, max_ips=3)
+    assert all(unlimited.allow(str(i)) for i in range(10))
+    limiter = RateLimiter(limit=1, max_ips=3)
+    assert limiter.allow("x") and not limiter.allow("x")
+    limiter.reset()
+    assert limiter.allow("x")
+
+
 async def test_heartbeat_ignores_unknown_fields(client):
     r = await client.post("/heartbeat/small-doc", json={"t": 60, "extra": "x"})
     assert r.status_code == 200  # pydantic ignores unknown fields; nothing retained
