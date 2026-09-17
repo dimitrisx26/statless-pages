@@ -1,7 +1,7 @@
 """In-memory MaxMind GeoIP2 Reader wrapper (zero-disk RAM lookups).
 
 The country database is opened once in ``MODE_MEMORY`` so every lookup
-after startup is served from RAM — no per-request disk I/O. Missing DB,
+after startup is served from RAM - no per-request disk I/O. Missing DB,
 private/reserved IPs, and lookup errors all map to ``"XX"`` (unknown)
 instead of raising, so tracking never breaks the pixel response.
 """
@@ -12,6 +12,9 @@ import ipaddress
 import logging
 from functools import lru_cache
 from pathlib import Path
+
+from geoip2.errors import AddressNotFoundError
+from maxminddb import InvalidDatabaseError
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +32,9 @@ class GeoLookup:
 
                 self._reader = geoip2.database.Reader(str(self.db_path), mode=maxminddb.MODE_MEMORY)
                 log.info("GeoIP2 loaded into RAM from %s", self.db_path)
-            except Exception as exc:  # noqa: BLE001 — tracking must never break on GeoIP failure
+            except (ImportError, maxminddb.InvalidDatabaseError, OSError) as exc:
+                # Corrupt/unreadable DB or missing dependency: tracking must
+                # never break on GeoIP failure, so degrade to no country data.
                 log.warning("GeoIP2 init failed (%s): country resolution disabled", exc)
         else:
             log.warning("GeoIP2 DB not found at %s: country resolution disabled", self.db_path)
@@ -48,14 +53,21 @@ class GeoLookup:
             resp = self._reader.country(ip.strip())
             code = (resp.country.iso_code or "").upper()
             return code if len(code) == 2 else UNKNOWN
-        except Exception:  # noqa: BLE001 — unknown IP/DB state maps to "XX"
+        except (AddressNotFoundError, InvalidDatabaseError, TypeError, ValueError):
+            # Unknown IP (not in DB) or corrupt record maps to "XX", never raises.
+            return UNKNOWN
+        except OSError:
+            # MODE_MEMORY reads from RAM; an I/O error here is unrecoverable -
+            # disable lookups rather than break tracking.
+            log.warning("GeoIP2 lookup failed; country resolution disabled")
+            self.close()
             return UNKNOWN
 
     def close(self) -> None:
         try:
             if self._reader is not None:
                 self._reader.close()
-        except Exception:  # noqa: BLE001,S110 — close is best-effort
+        except OSError:
             pass
         self._reader = None
 

@@ -59,18 +59,25 @@ async def test_embed_has_csp_and_beacon(client):
     r = await client.get("/embed/my-doc")
     assert r.status_code == 200
     csp = r.headers["Content-Security-Policy"]
-    # Wildcards never match the apex domain — shared Notion pages embed via it.
+    # Wildcards never match the apex domain - shared Notion pages embed via it.
     assert "https://notion.so" in csp and "https://*.notion.so" in csp
     assert "sendBeacon" in r.text
     assert "views" in r.text
 
 
 async def test_stats_aggregates(client):
+    from datetime import UTC, datetime
+
     await client.get("/pixel/readme.svg")
     await client.post("/heartbeat/readme", json={"t": 15})
     data = await _wait_for_views(client, "readme")
     assert data["views"] >= 1
     assert data["dwell"].get("15", 0) >= 1
+    # Daily time-series: all test events land "today" (UTC).
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    assert data["daily"][today]["views"] >= 1
+    assert data["daily"][today]["uniques"] >= 1
+    assert data["daily"][today]["heartbeats"].get("15", 0) >= 1
 
 
 def test_salt_hash_is_stable_within_epoch():
@@ -90,7 +97,7 @@ def test_geo_unknown_on_private_ip():
 
 
 async def _wait_for_views(client, doc_key: str, minimum: int = 1) -> dict:
-    """Pixel ingestion runs as a background task — poll until it lands."""
+    """Pixel ingestion runs as a background task - poll until it lands."""
     data: dict = {}
     for _ in range(20):
         r = await client.get(f"/stats/{doc_key}")
@@ -137,11 +144,24 @@ async def test_ref_param_rejects_injection(client):
     assert data["referrers"] == []  # not a tag, not a URL → dropped
 
 
+async def test_stats_device_breakdown(client):
+    # One desktop Chrome, one iPhone Safari → two buckets, desktop wins ties by count.
+    await client.get("/pixel/dev.svg", headers={"user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"})
+    await client.get("/pixel/dev.svg", headers={"user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"})
+    await client.get("/pixel/dev.svg", headers={"user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"})
+    data = await _wait_for_views(client, "dev", minimum=3)
+    devices = {d["device"]: d["count"] for d in data["devices"]}
+    assert devices == {"desktop-chrome": 2, "mobile-safari": 1}
+    assert len(data["devices"]) == 2
+
+
 async def test_stats_error_does_not_leak_exception(client, monkeypatch):
+    from sqlalchemy.exc import SQLAlchemyError
+
     from collector import database
 
     async def boom(_doc):
-        raise RuntimeError("sqlite3.OperationalError: host=db.internal user=secret")
+        raise SQLAlchemyError("host=db.internal user=secret")
 
     monkeypatch.setattr(database, "get_stats", boom)
     r = await client.get("/stats/some-doc")
@@ -153,7 +173,7 @@ async def test_stats_error_does_not_leak_exception(client, monkeypatch):
 async def test_rate_limit_blocks_flood(client):
     # Pixels silently drop over-limit ingests (an <img> can't render a 429);
     # heartbeats return 429. Keyed on the socket IP, so spoofed XFF headers
-    # cannot buy new buckets — even with TRUST_PROXY enabled.
+    # cannot buy new buckets - even with TRUST_PROXY enabled.
     from collector.config import get_settings
     from collector.main import _limiter
 
@@ -246,6 +266,78 @@ async def test_stats_token_gate(client, monkeypatch):
         assert (await client.get("/stats/my-doc?token=shh")).status_code == 200
     finally:
         get_settings.cache_clear()
+
+
+async def test_embed_default_csp_matches_notion_defaults(client):
+    from collector.config import DEFAULT_EMBED_ORIGINS
+
+    r = await client.get("/embed/my-doc")
+    csp = r.headers["Content-Security-Policy"]
+    # Baseline source policy plus the default frame-ancestors list.
+    assert "default-src 'none'" in csp
+    assert "connect-src 'self'" in csp and "form-action 'none'" in csp
+    assert "frame-ancestors " + " ".join(DEFAULT_EMBED_ORIGINS) + ";" in csp
+
+
+async def test_embed_custom_origins_replace_csp(client, monkeypatch):
+    from collector.config import get_settings
+
+    monkeypatch.setenv("EMBED_ALLOWED_ORIGINS", "https://docs.example.com, https://*.team.example.com")
+    get_settings.cache_clear()
+    try:
+        r = await client.get("/embed/my-doc")
+        csp = r.headers["Content-Security-Policy"]
+        assert "frame-ancestors https://docs.example.com https://*.team.example.com;" in csp
+        assert "https://notion.so" not in csp  # custom list replaces defaults
+        # Baseline source policy stays locked down regardless of ancestors.
+        assert "img-src 'self' data:; connect-src 'self'" in csp
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_embed_empty_origins_block_all_framing(client, monkeypatch):
+    from collector.config import get_settings
+
+    monkeypatch.setenv("EMBED_ALLOWED_ORIGINS", "")
+    get_settings.cache_clear()
+    try:
+        r = await client.get("/embed/my-doc")
+        csp = r.headers["Content-Security-Policy"]
+        assert "frame-ancestors 'none';" in csp
+        assert "default-src 'none'" in csp  # baseline stays with framing blocked
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_privacy_page_carries_locked_csp(client):
+    r = await client.get("/privacy")
+    assert r.status_code == 200
+    csp = r.headers["Content-Security-Policy"]
+    assert csp == "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'"
+
+
+async def test_responses_carry_referrer_policy(client):
+    for path in ("/badge/ref-pol.svg", "/stats/ref-pol", "/embed/ref-pol", "/privacy"):
+        r = await client.get(path)
+        assert r.status_code in (200, 400)
+        assert r.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+
+
+def test_embed_rejects_invalid_origins(monkeypatch):
+    from collector.config import Settings
+
+    for bad in ("http://example.com", "https://*example.com", "example.com", "https://a.com/path"):
+        with pytest.raises(ValueError):
+            Settings(embed_allowed_origins=[bad])
+
+
+def test_embed_dedupes_origins():
+    from collector.config import Settings
+
+    s = Settings(
+        embed_allowed_origins=["https://example.com", "https://example.com", "https://other.com"]
+    )
+    assert s.embed_allowed_origins == ["https://example.com", "https://other.com"]
 
 
 async def test_retention_deletes_old_events_only(client):

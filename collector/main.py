@@ -27,6 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import SQLAlchemyError
 
 from . import __version__, salt
 from . import database as db
@@ -40,11 +41,6 @@ PIXEL_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1">'
     '<rect width="1" height="1" fill="none"/></svg>'
 )
-# Apex domains matter: *.notion.so never matches https://notion.so itself.
-EMBED_CSP = (
-    "frame-ancestors https://notion.so https://*.notion.so "
-    "https://notion.site https://*.notion.site;"
-)
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -54,9 +50,8 @@ def _no_store(resp: Response) -> Response:
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
     resp.headers["X-Content-Type-Options"] = "nosniff"
-    # Keep crawler traffic (which fetches pixel/badge/embed URLs) out of both
-    # search indexes and your view counts.
     resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     return resp
 
 
@@ -64,12 +59,16 @@ def _valid_doc(doc_key: str) -> bool:
     return bool(DOC_KEY_RE.match(doc_key))
 
 
+def _invalid_doc_error() -> Response:
+    return _no_store(Response("invalid doc key", status_code=400, media_type="text/plain"))
+
+
 def _tracking_allowed(request: Request) -> bool:
     return not any(request.headers.get(header, "").strip() == "1" for header in ("dnt", "sec-gpc"))
 
 
 def _socket_ip(request: Request) -> str:
-    """Direct TCP peer — spoof-proof (ignores headers), so the rate limiter keys on this."""
+    """Direct TCP peer - spoof-proof (ignores headers), so the rate limiter keys on this."""
     return request.client.host if request.client else "unknown"
 
 
@@ -77,7 +76,6 @@ def _client_ip(request: Request) -> str:
     """IP for hashing/geo. Honors proxy headers ONLY when TRUST_PROXY=true."""
     settings = get_settings()
     if settings.trust_proxy:
-        # Only trustworthy behind a proxy that overwrites (not appends) these headers.
         xff = request.headers.get("x-forwarded-for", "")
         if xff:
             return xff.split(",")[0].strip()
@@ -132,18 +130,21 @@ _limiter = RateLimiter(get_settings().rate_limit)
 
 
 def _identity(request: Request) -> tuple[str, str]:
-    """Resolve (ip_hash, country) once per request.
-
-    When the IP is unresolvable (no client socket), a random hash keeps such
-    events from collapsing into one shared "unique".
-    """
+    """(ip_hash, country) per request; unresolvable IPs hash as anon so they don't share one bucket."""
     ip = _client_ip(request)
     if not ip:
         return salt.hash_ip(f"anon-{time.time_ns()}"), "XX"
     return salt.hash_ip(ip), get_geo().country(ip)
 
 
-async def _record_view(doc_key: str, request: Request, ref: str = "") -> None:
+async def _record_event(
+    doc_key: str,
+    request: Request,
+    kind: str,
+    ref: str = "",
+    dwell_seconds: int | None = None,
+) -> None:
+    """One ingest path for views and heartbeats; failures never propagate."""
     ip_hash, country = _identity(request)
     try:
         await db.log_event(
@@ -152,26 +153,11 @@ async def _record_view(doc_key: str, request: Request, ref: str = "") -> None:
             country=country,
             referrer=_referrer(request, ref),
             ua=request.headers.get("user-agent", "") or "",
-            kind="view",
-        )
-    except Exception:
-        log.debug("view ingest failed for %s", doc_key, exc_info=True)
-
-
-async def _record_heartbeat(doc_key: str, request: Request, dwell_seconds: int) -> None:
-    ip_hash, country = _identity(request)
-    try:
-        await db.log_event(
-            doc_key=doc_key,
-            ip_hash=ip_hash,
-            country=country,
-            referrer=_referrer(request),
-            ua=request.headers.get("user-agent", "") or "",
-            kind="heartbeat",
+            kind=kind,
             dwell_seconds=dwell_seconds,
         )
-    except Exception:
-        log.debug("heartbeat ingest failed for %s", doc_key, exc_info=True)
+    except Exception:  # ingest must never break pixel responses
+        log.debug("%s ingest failed for %s", kind, doc_key, exc_info=True)
 
 
 @asynccontextmanager
@@ -212,11 +198,7 @@ app.add_middleware(
 
 
 class BodyLimitMiddleware:
-    """Reject POST/PUT/PATCH bodies over `max_bytes` with 413, before parsing.
-
-    Covers declared Content-Length and chunked bodies (bounded buffer + replay).
-    Only /heartbeat accepts a body, and its payloads are < 100 bytes.
-    """
+    """Reject POST/PUT/PATCH bodies over `max_bytes` (413) before parsing; chunked-safe."""
 
     def __init__(self, app, max_bytes: int = 4096) -> None:
         self.app = app
@@ -231,7 +213,7 @@ class BodyLimitMiddleware:
             if name == b"content-length":
                 try:
                     declared = int(value)
-                except ValueError:
+                except ValueError:  # malformed header: treat as too large
                     declared = self.max_bytes + 1
                 break
         if declared is not None and declared > self.max_bytes:
@@ -240,7 +222,7 @@ class BodyLimitMiddleware:
         if declared is not None:
             await self.app(scope, receive, send)
             return
-        # Unknown length (chunked): buffer bounded, then replay downstream.
+        # Chunked (no Content-Length): buffer bounded, then replay downstream.
         chunks: list[bytes] = []
         total = 0
         while True:
@@ -277,8 +259,7 @@ app.add_middleware(BodyLimitMiddleware)
 
 @app.exception_handler(RequestValidationError)
 async def _validation_no_store(request: Request, exc: RequestValidationError) -> JSONResponse:
-    # Same shape as FastAPI's default 422, plus no-store. Bodies are capped at
-    # 4 KB by BodyLimitMiddleware, so the echoed `input` stays bounded.
+    # FastAPI's default 422 shape plus no-store (echoed input is capped at 4 KB).
     return _no_store(JSONResponse(status_code=422, content=jsonable_encoder(exc.errors())))
 
 
@@ -287,12 +268,14 @@ async def healthz() -> dict:
     return {"ok": True}
 
 
-
-
 @app.get("/privacy", include_in_schema=False)
 async def privacy() -> Response:
     html = (Path(__file__).parent / "templates" / "privacy.html").read_text()
-    return _no_store(HTMLResponse(html))
+    resp = _no_store(HTMLResponse(html))
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'"
+    )
+    return resp
 
 
 @app.get("/", include_in_schema=False)
@@ -316,35 +299,50 @@ async def index() -> JSONResponse:
 @app.get("/pixel/{doc_key}.svg", include_in_schema=False)
 async def pixel(doc_key: str, request: Request, background: BackgroundTasks, ref: str = "") -> Response:
     if not _valid_doc(doc_key):
-        return _no_store(Response("invalid doc key", status_code=400, media_type="text/plain"))
+        return _invalid_doc_error()
     # Over-limit views are silently dropped: an <img> can't render a 429.
     if _tracking_allowed(request) and _limiter.allow(_socket_ip(request)):
-        background.add_task(_record_view, doc_key, request, ref)
+        background.add_task(_record_event, doc_key, request, "view", ref)
     return _no_store(Response(PIXEL_SVG, media_type="image/svg+xml"))
 
 
 async def _view_count_safe(doc_key: str) -> int:
-    """View count, or 0 on DB errors — embed/badge must never 500."""
+    """View count, or 0 on DB errors - embed/badge must never 500."""
     try:
         return await db.get_view_count(doc_key)
-    except Exception:  # noqa: BLE001 — degrade to 0 on DB errors
+    except SQLAlchemyError:  # degrade to 0 on DB errors
         return 0
 
 
 @app.get("/embed/{doc_key}", response_class=HTMLResponse)
 async def embed(doc_key: str, request: Request, background: BackgroundTasks) -> Response:
     if not _valid_doc(doc_key):
-        return _no_store(Response("invalid doc key", status_code=400, media_type="text/plain"))
+        return _invalid_doc_error()
     if _tracking_allowed(request) and _limiter.allow(_socket_ip(request)):
-        background.add_task(_record_view, doc_key, request)
+        background.add_task(_record_event, doc_key, request, "view")
     views = await _view_count_safe(doc_key)
     resp = TEMPLATES.TemplateResponse(
         request,
         "embed.html",
         {"doc_key": doc_key, "views": views, "base_url": get_settings().base_url.rstrip("/")},
     )
-    resp.headers["Content-Security-Policy"] = EMBED_CSP
+    resp.headers["Content-Security-Policy"] = _embed_csp()
     return _no_store(resp)
+
+
+def _embed_csp() -> str:
+    origins = get_settings().embed_allowed_origins
+    ancestors = (
+        "frame-ancestors " + " ".join(origins) + ";" if origins else "frame-ancestors 'none';"
+    )
+    # Self-contained page: nothing legitimately loads from any other origin.
+    return (
+        "default-src 'none'; "
+        "script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; "
+        "form-action 'none'; base-uri 'none'; "
+        + ancestors
+    )
 
 
 class Heartbeat(BaseModel):
@@ -359,14 +357,14 @@ async def heartbeat(doc_key: str, beat: Heartbeat, request: Request) -> JSONResp
         return _no_store(JSONResponse({"ok": True, "tracked": False}))
     if not _limiter.allow(_socket_ip(request)):
         return _no_store(JSONResponse({"ok": False, "error": "rate limited"}, status_code=429))
-    await _record_heartbeat(doc_key, request, beat.t)
+    await _record_event(doc_key, request, "heartbeat", dwell_seconds=beat.t)
     return _no_store(JSONResponse({"ok": True, "t": beat.t}))
 
 
 @app.get("/badge/{doc_key}.svg", include_in_schema=False)
 async def badge(doc_key: str) -> Response:
     if not _valid_doc(doc_key):
-        return _no_store(Response("invalid", status_code=400, media_type="text/plain"))
+        return _invalid_doc_error()
     views = await _view_count_safe(doc_key)
     label = f"{views} views" if views != 1 else "1 view"
     w = 8 * len(label) + 28
@@ -390,9 +388,8 @@ async def stats(doc_key: str, token: str = "") -> JSONResponse:
         return _no_store(JSONResponse({"ok": False, "error": "forbidden"}, status_code=403))
     try:
         data = await db.get_stats(doc_key)
-    except Exception:
+    except SQLAlchemyError:
         log.exception("stats failed for %s", doc_key)
-        # Return (don't raise) so the 500 still carries no-store; detail logged, never leaked.
         return _no_store(JSONResponse({"ok": False, "error": "stats unavailable"}, status_code=500))
     return _no_store(JSONResponse(data))
 
