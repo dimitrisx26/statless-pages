@@ -1,7 +1,11 @@
+# pyright: reportPrivateUsage=false
 """Smoke tests for the ingestion engine (SQLite per-test temp file)."""
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -17,7 +21,7 @@ MOBILE_UA = (
 
 
 @pytest.fixture
-async def client(tmp_path):
+async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
     # Isolate each test to a temp SQLite file (shared in-memory DBs don't survive pools).
     from collector.config import get_settings
 
@@ -39,7 +43,7 @@ async def client(tmp_path):
     get_settings.cache_clear()
 
 
-async def test_pixel_returns_svg_with_no_store(client):
+async def test_pixel_returns_svg_with_no_store(client: AsyncClient) -> None:
     r = await client.get("/pixel/my-doc.svg")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("image/svg+xml")
@@ -48,24 +52,24 @@ async def test_pixel_returns_svg_with_no_store(client):
     assert "<svg" in r.text
 
 
-async def test_pixel_rejects_bad_key(client):
+async def test_pixel_rejects_bad_key(client: AsyncClient) -> None:
     r = await client.get("/pixel/..%2Fetc.svg")
     assert r.status_code in (400, 404)
 
 
-async def test_heartbeat_accepts_buckets(client):
+async def test_heartbeat_accepts_buckets(client: AsyncClient) -> None:
     for t in (15, 30, 60, 120):
         r = await client.post("/heartbeat/my-doc", json={"t": t})
         assert r.status_code == 200, r.text
         assert r.json()["t"] == t
 
 
-async def test_heartbeat_rejects_bad_bucket(client):
+async def test_heartbeat_rejects_bad_bucket(client: AsyncClient) -> None:
     r = await client.post("/heartbeat/my-doc", json={"t": 999})
     assert r.status_code == 422
 
 
-async def test_embed_has_csp_and_beacon(client):
+async def test_embed_has_csp_and_beacon(client: AsyncClient) -> None:
     from collector.config import DEFAULT_EMBED_ORIGINS
 
     r = await client.get("/embed/my-doc")
@@ -77,7 +81,7 @@ async def test_embed_has_csp_and_beacon(client):
     assert "views" in r.text
 
 
-async def test_stats_aggregates(client):
+async def test_stats_aggregates(client: AsyncClient) -> None:
     from datetime import UTC, datetime
 
     await client.get("/pixel/readme.svg")
@@ -92,7 +96,7 @@ async def test_stats_aggregates(client):
     assert data["daily"][today]["heartbeats"].get("15", 0) >= 1
 
 
-def test_salt_hash_is_stable_within_epoch():
+def test_salt_hash_is_stable_within_epoch() -> None:
     from collector import salt
 
     s = salt.current_salt()
@@ -100,7 +104,7 @@ def test_salt_hash_is_stable_within_epoch():
     assert salt.hash_ip("1.2.3.4", s) != salt.hash_ip("5.6.7.8", s)
 
 
-def test_geo_unknown_on_private_ip():
+def test_geo_unknown_on_private_ip() -> None:
     from collector.geo import GeoLookup
 
     g = GeoLookup("/nonexistent/GeoLite2-Country.mmdb")
@@ -108,9 +112,9 @@ def test_geo_unknown_on_private_ip():
     assert g.country("not-an-ip") == "XX"
 
 
-async def _wait_for_views(client, doc_key: str, minimum: int = 1) -> dict:
+async def _wait_for_views(client: AsyncClient, doc_key: str, minimum: int = 1) -> dict[str, Any]:
     """Pixel ingestion runs as a background task - poll until it lands."""
-    data: dict = {}
+    data: dict[str, Any] = {}
     for _ in range(20):
         r = await client.get(f"/stats/{doc_key}")
         assert r.status_code == 200
@@ -121,7 +125,7 @@ async def _wait_for_views(client, doc_key: str, minimum: int = 1) -> dict:
     return data
 
 
-async def test_referrer_stored_origin_only(client):
+async def test_referrer_stored_origin_only(client: AsyncClient) -> None:
     await client.get(
         "/pixel/ref-test.svg",
         headers={"referer": "https://mail.example.com/read?token=SECRET123&user=bob"},
@@ -132,7 +136,7 @@ async def test_referrer_stored_origin_only(client):
     assert "SECRET123" not in str(data)
 
 
-async def test_referrer_strips_userinfo(client):
+async def test_referrer_strips_userinfo(client: AsyncClient) -> None:
     await client.get(
         "/pixel/creds.svg",
         headers={"referer": "https://user:s3cret@mail.example.com/inbox"},
@@ -143,20 +147,20 @@ async def test_referrer_strips_userinfo(client):
     assert "s3cret" not in str(data)
 
 
-async def test_ref_param_accepts_approved_tag(client):
+async def test_ref_param_accepts_approved_tag(client: AsyncClient) -> None:
     await client.get("/pixel/tag-test.svg?ref=substack")
     data = await _wait_for_views(client, "tag-test")
     refs = [r["referrer"] for r in data["referrers"]]
     assert refs == ["substack"]
 
 
-async def test_ref_param_rejects_injection(client):
+async def test_ref_param_rejects_injection(client: AsyncClient) -> None:
     await client.get("/pixel/bad-ref.svg", params={"ref": "<script>alert(1)</script>"})
     data = await _wait_for_views(client, "bad-ref")
     assert data["referrers"] == []  # not a tag, not a URL → dropped
 
 
-async def test_stats_device_breakdown(client):
+async def test_stats_device_breakdown(client: AsyncClient) -> None:
     # One desktop Chrome, one iPhone Safari → two buckets, desktop wins ties by count.
     await client.get(
         "/pixel/dev.svg",
@@ -176,12 +180,14 @@ async def test_stats_device_breakdown(client):
     assert len(data["devices"]) == 2
 
 
-async def test_stats_error_does_not_leak_exception(client, monkeypatch):
+async def test_stats_error_does_not_leak_exception(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from sqlalchemy.exc import SQLAlchemyError
 
     from collector import database
 
-    async def boom(_doc, since=None, to=None):
+    async def boom(_doc: str, since: str | None = None, to: str | None = None) -> None:
         raise SQLAlchemyError("host=db.internal user=secret")
 
     monkeypatch.setattr(database, "get_stats", boom)
@@ -191,7 +197,7 @@ async def test_stats_error_does_not_leak_exception(client, monkeypatch):
     assert "OperationalError" not in r.text
 
 
-async def test_rate_limit_blocks_flood(client):
+async def test_rate_limit_blocks_flood(client: AsyncClient) -> None:
     # Pixels silently drop over-limit ingests (an <img> can't render a 429);
     # heartbeats return 429. Keyed on the socket IP, so spoofed XFF headers
     # cannot buy new buckets - even with TRUST_PROXY enabled.
@@ -218,7 +224,7 @@ async def test_rate_limit_blocks_flood(client):
     assert codes.count(429) == 3
 
 
-def test_rate_limiter_rejects_when_full_and_keeps_existing_keys():
+def test_rate_limiter_rejects_when_full_and_keeps_existing_keys() -> None:
     # A flood of new IPs must not evict live buckets (that would reset limits),
     # so once full, untracked keys are refused and the first client keeps its budget.
     from collector.main import RateLimiter
@@ -231,7 +237,7 @@ def test_rate_limiter_rejects_when_full_and_keeps_existing_keys():
     assert limiter.allow("a") is False
 
 
-def test_rate_limiter_respects_limit_zero_and_reset():
+def test_rate_limiter_respects_limit_zero_and_reset() -> None:
     from collector.main import RateLimiter
 
     unlimited = RateLimiter(limit=0, max_ips=3)
@@ -243,28 +249,30 @@ def test_rate_limiter_respects_limit_zero_and_reset():
     assert limiter.allow("x")
 
 
-async def test_heartbeat_ignores_unknown_fields(client):
+async def test_heartbeat_ignores_unknown_fields(client: AsyncClient) -> None:
     r = await client.post("/heartbeat/small-doc", json={"t": 60, "extra": "x"})
     assert r.status_code == 200  # pydantic ignores unknown fields; nothing retained
 
 
-async def test_heartbeat_rejects_oversize_body(client):
+async def test_heartbeat_rejects_oversize_body(client: AsyncClient) -> None:
     r = await client.post("/heartbeat/small-doc", json={"t": 60, "pad": "x" * 100_000})
     assert r.status_code == 413
     assert r.headers["Cache-Control"].startswith("no-store")
 
 
-async def test_422_carries_no_store(client):
+async def test_422_carries_no_store(client: AsyncClient) -> None:
     r = await client.post("/heartbeat/my-doc", json={"t": 999})
     assert r.status_code == 422
     assert r.headers["Cache-Control"].startswith("no-store")
 
 
 @pytest.mark.parametrize("header", ["DNT", "Sec-GPC"])
-async def test_privacy_signal_skips_ingestion(client, monkeypatch, header):
+async def test_privacy_signal_skips_ingestion(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, header: str
+) -> None:
     from collector import database, main
 
-    def unexpected_identity(_request):
+    def unexpected_identity(_request: Any) -> None:
         pytest.fail("Opted-out requests must not resolve an identity")
 
     monkeypatch.setattr(main, "_identity", unexpected_identity)
@@ -277,7 +285,7 @@ async def test_privacy_signal_skips_ingestion(client, monkeypatch, header):
     assert main._limiter._hits == {}
 
 
-async def test_stats_token_gate(client, monkeypatch):
+async def test_stats_token_gate(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
     from collector.config import get_settings
 
     monkeypatch.setenv("STATS_TOKEN", "shh")
@@ -290,7 +298,7 @@ async def test_stats_token_gate(client, monkeypatch):
         get_settings.cache_clear()
 
 
-async def test_embed_default_csp_matches_notion_defaults(client):
+async def test_embed_default_csp_matches_notion_defaults(client: AsyncClient) -> None:
     from collector.config import DEFAULT_EMBED_ORIGINS
 
     r = await client.get("/embed/my-doc")
@@ -302,7 +310,9 @@ async def test_embed_default_csp_matches_notion_defaults(client):
     assert "frame-ancestors " + " ".join(DEFAULT_EMBED_ORIGINS) + ";" in csp
 
 
-async def test_embed_custom_origins_replace_csp(client, monkeypatch):
+async def test_embed_custom_origins_replace_csp(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from collector.config import get_settings
 
     monkeypatch.setenv(
@@ -320,7 +330,9 @@ async def test_embed_custom_origins_replace_csp(client, monkeypatch):
         get_settings.cache_clear()
 
 
-async def test_embed_empty_origins_block_all_framing(client, monkeypatch):
+async def test_embed_empty_origins_block_all_framing(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from collector.config import get_settings
 
     monkeypatch.setenv("EMBED_ALLOWED_ORIGINS", "")
@@ -334,7 +346,7 @@ async def test_embed_empty_origins_block_all_framing(client, monkeypatch):
         get_settings.cache_clear()
 
 
-async def test_privacy_page_carries_locked_csp(client):
+async def test_privacy_page_carries_locked_csp(client: AsyncClient) -> None:
     r = await client.get("/privacy")
     assert r.status_code == 200
     csp = r.headers["Content-Security-Policy"]
@@ -343,14 +355,14 @@ async def test_privacy_page_carries_locked_csp(client):
     )
 
 
-async def test_responses_carry_referrer_policy(client):
+async def test_responses_carry_referrer_policy(client: AsyncClient) -> None:
     for path in ("/badge/ref-pol.svg", "/stats/ref-pol", "/embed/ref-pol", "/privacy"):
         r = await client.get(path)
         assert r.status_code in (200, 400)
         assert r.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
 
 
-def test_embed_rejects_invalid_origins(monkeypatch):
+def test_embed_rejects_invalid_origins(monkeypatch: pytest.MonkeyPatch) -> None:
     from collector.config import Settings
 
     for bad in ("http://example.com", "https://*example.com", "example.com", "https://a.com/path"):
@@ -358,7 +370,7 @@ def test_embed_rejects_invalid_origins(monkeypatch):
             Settings(embed_allowed_origins=[bad])
 
 
-def test_embed_dedupes_origins():
+def test_embed_dedupes_origins() -> None:
     from collector.config import Settings
 
     s = Settings(
@@ -367,7 +379,7 @@ def test_embed_dedupes_origins():
     assert s.embed_allowed_origins == ["https://example.com", "https://other.com"]
 
 
-async def test_retention_deletes_old_events_only(client):
+async def test_retention_deletes_old_events_only(client: AsyncClient) -> None:
     from datetime import UTC, datetime, timedelta
 
     from collector import database
@@ -388,7 +400,7 @@ async def test_retention_deletes_old_events_only(client):
     assert (await database.get_stats("old-doc"))["events"] == 0
 
 
-async def test_retention_zero_disables(client):
+async def test_retention_zero_disables(client: AsyncClient) -> None:
     from collector import database
 
     await database.log_event(doc_key="keep-doc", ip_hash="c" * 32)
@@ -396,7 +408,7 @@ async def test_retention_zero_disables(client):
     assert (await database.get_stats("keep-doc"))["events"] == 1
 
 
-async def test_purge_doc_erases_all_events_for_key(client):
+async def test_purge_doc_erases_all_events_for_key(client: AsyncClient) -> None:
     from collector import database
 
     await database.log_event(doc_key="erase-me", ip_hash="d" * 32)
@@ -410,14 +422,14 @@ async def test_purge_doc_erases_all_events_for_key(client):
     assert (await database.get_stats("keep-me"))["events"] == 1
 
 
-def test_retention_days_rejects_negative(monkeypatch):
+def test_retention_days_rejects_negative(monkeypatch: pytest.MonkeyPatch) -> None:
     from collector.config import Settings
 
     with pytest.raises(ValueError, match="greater than or equal to 0"):
         Settings(retention_days=-1)
 
 
-async def test_stats_date_range_filters(client):
+async def test_stats_date_range_filters(client: AsyncClient) -> None:
     from datetime import UTC, datetime, timedelta
 
     from collector import database
@@ -455,12 +467,12 @@ async def test_stats_date_range_filters(client):
     assert both.status_code == 400  # since after to is rejected up front
 
 
-async def test_stats_rejects_bad_date_filters(client):
+async def test_stats_rejects_bad_date_filters(client: AsyncClient) -> None:
     assert (await client.get("/stats/my-doc?since=not-a-date")).status_code == 400
     assert (await client.get("/stats/my-doc?since=2026-09-30&to=2026-09-01")).status_code == 400
 
 
-async def test_badge_custom_label_and_color(client):
+async def test_badge_custom_label_and_color(client: AsyncClient) -> None:
     r = await client.get("/badge/label-doc.svg?label=Testing&labelColor=6A5ACD&color=ABCDEF")
     assert r.status_code == 200
     svg = r.text
@@ -469,14 +481,14 @@ async def test_badge_custom_label_and_color(client):
     assert "ABCDEF" in svg
 
 
-async def test_badge_rejects_bad_label_and_color(client):
+async def test_badge_rejects_bad_label_and_color(client: AsyncClient) -> None:
     r = await client.get("/badge/label-doc.svg?label=" + "x" * 41)
     assert r.status_code == 400
     assert (await client.get("/badge/label-doc.svg?color=zzz")).status_code == 400
     assert (await client.get("/badge/label-doc.svg?color=red;fill=url(#x)")).status_code == 400
 
 
-async def test_embed_theme_param_override(client):
+async def test_embed_theme_param_override(client: AsyncClient) -> None:
     light = await client.get("/embed/theme-doc?theme=light")
     dark = await client.get("/embed/theme-doc?theme=dark")
     assert light.status_code == dark.status_code == 200
@@ -484,7 +496,7 @@ async def test_embed_theme_param_override(client):
     assert (await client.get("/embed/theme-doc?theme=weird")).status_code == 200
 
 
-async def test_robots_and_security_txt(client):
+async def test_robots_and_security_txt(client: AsyncClient) -> None:
     r = await client.get("/robots.txt")
     assert r.status_code == 200
     assert "Disallow: /" in r.text
@@ -494,7 +506,9 @@ async def test_robots_and_security_txt(client):
     assert "Contact:" in s.text
 
 
-async def test_export_jsonl_gated_by_stats_token(client, monkeypatch):
+async def test_export_jsonl_gated_by_stats_token(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from collector import database
     from collector.config import get_settings
 
@@ -525,7 +539,7 @@ async def test_export_jsonl_gated_by_stats_token(client, monkeypatch):
         get_settings.cache_clear()
 
 
-async def test_public_export_omits_identity(client):
+async def test_public_export_omits_identity(client: AsyncClient) -> None:
     from collector import database
 
     await database.log_event(doc_key="pub-doc", ip_hash="a" * 32, ua="Mozilla/5.0")
@@ -538,7 +552,9 @@ async def test_public_export_omits_identity(client):
     assert rows[0]["doc_key"] == "pub-doc"
 
 
-async def test_erasure_requires_stats_token(client, monkeypatch):
+async def test_erasure_requires_stats_token(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from collector import database
     from collector.config import get_settings
 
@@ -564,7 +580,9 @@ async def test_erasure_requires_stats_token(client, monkeypatch):
         get_settings.cache_clear()
 
 
-async def test_security_txt_is_configurable(client, monkeypatch):
+async def test_security_txt_is_configurable(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from collector.config import get_settings
 
     monkeypatch.setenv("SECURITY_CONTACT", "mailto:sec@example.com")
@@ -579,7 +597,7 @@ async def test_security_txt_is_configurable(client, monkeypatch):
         get_settings.cache_clear()
 
 
-async def test_view_dedupe_window(client, monkeypatch):
+async def test_view_dedupe_window(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
     from collector import database
     from collector.config import get_settings
 
@@ -598,7 +616,7 @@ async def test_view_dedupe_window(client, monkeypatch):
         get_settings.cache_clear()
 
 
-async def test_view_dedupe_disabled_by_default(client):
+async def test_view_dedupe_disabled_by_default(client: AsyncClient) -> None:
     from collector import database
 
     await client.get("/pixel/dedup2.svg")
@@ -611,7 +629,9 @@ async def test_view_dedupe_disabled_by_default(client):
     assert (await database.count_events("dedup2")) == 3
 
 
-def test_secret_salt_is_deterministic_within_rotation_window(monkeypatch):
+def test_secret_salt_is_deterministic_within_rotation_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from collector import salt as salt_mod
 
     s1 = salt_mod.derive_ephemeral_salt("topsecret")
@@ -619,12 +639,12 @@ def test_secret_salt_is_deterministic_within_rotation_window(monkeypatch):
     assert s1 == s2  # stable within the current rotation window
 
 
-async def test_security_txt_and_robots_no_store(client):
+async def test_security_txt_and_robots_no_store(client: AsyncClient) -> None:
     r = await client.get("/robots.txt")
     assert r.headers["Cache-Control"].startswith("no-store")
 
 
-async def test_bot_user_agent_is_not_tracked(client):
+async def test_bot_user_agent_is_not_tracked(client: AsyncClient) -> None:
     from collector import database
 
     await client.get(
@@ -638,7 +658,7 @@ async def test_bot_user_agent_is_not_tracked(client):
     assert await database.count_events("bot-doc") == 0
 
 
-async def test_preview_and_prefetch_headers_are_not_tracked(client):
+async def test_preview_and_prefetch_headers_are_not_tracked(client: AsyncClient) -> None:
     from collector import database
 
     await client.get("/pixel/prefetch-doc.svg", headers={"sec-purpose": "prefetch"})
@@ -647,7 +667,7 @@ async def test_preview_and_prefetch_headers_are_not_tracked(client):
     assert await database.count_events("prefetch-doc") == 0
 
 
-async def test_bot_heartbeat_reports_not_tracked(client):
+async def test_bot_heartbeat_reports_not_tracked(client: AsyncClient) -> None:
     r = await client.post(
         "/heartbeat/bot-hb", json={"t": 15}, headers={"user-agent": "AhrefsBot/7.0"}
     )
@@ -655,7 +675,9 @@ async def test_bot_heartbeat_reports_not_tracked(client):
     assert r.json() == {"ok": True, "tracked": False}
 
 
-async def test_filter_bots_can_be_disabled(client, monkeypatch):
+async def test_filter_bots_can_be_disabled(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from collector import database
     from collector.config import get_settings
 
@@ -672,7 +694,7 @@ async def test_filter_bots_can_be_disabled(client, monkeypatch):
         get_settings.cache_clear()
 
 
-async def test_utm_params_become_ref_tag(client):
+async def test_utm_params_become_ref_tag(client: AsyncClient) -> None:
     await client.get(
         "/pixel/utm-doc.svg?utm_source=Newsletter&utm_medium=email&utm_campaign=Launch%202026"
     )
@@ -680,13 +702,13 @@ async def test_utm_params_become_ref_tag(client):
     assert [r["referrer"] for r in data["referrers"]] == ["newsletter-email-launch-2026"]
 
 
-async def test_explicit_ref_beats_utm(client):
+async def test_explicit_ref_beats_utm(client: AsyncClient) -> None:
     await client.get("/pixel/utm-ref.svg?ref=explicit&utm_source=newsletter")
     data = await _wait_for_views(client, "utm-ref")
     assert [r["referrer"] for r in data["referrers"]] == ["explicit"]
 
 
-async def test_overview_lists_docs_and_scopes_by_prefix(client):
+async def test_overview_lists_docs_and_scopes_by_prefix(client: AsyncClient) -> None:
     from collector import database
 
     await database.log_event(doc_key="site-a", ip_hash="a" * 32)
@@ -708,7 +730,9 @@ async def test_overview_lists_docs_and_scopes_by_prefix(client):
     assert {d["doc"] for d in scoped["docs"]} == {"site_a"}
 
 
-async def test_overview_rejects_bad_prefix_and_gates_token(client, monkeypatch):
+async def test_overview_rejects_bad_prefix_and_gates_token(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from collector.config import get_settings
 
     assert (await client.get("/overview?prefix=bad..key")).status_code == 400
