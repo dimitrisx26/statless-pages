@@ -20,10 +20,11 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterable, MutableMapping
+from contextlib import asynccontextmanager, suppress
+from datetime import date
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -33,6 +34,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import __version__, salt
 from . import database as db
@@ -51,7 +53,8 @@ PIXEL_SVG = (
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
-def _no_store(resp: Response) -> Response:
+def _no_store[T: Response](resp: T) -> T:
+    """Attach the tracker's hardening headers, preserving the concrete response type."""
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
@@ -130,7 +133,9 @@ def _utm_tag(request: Request) -> str:
     """Collapse allow-listed UTM params into one approved tag (e.g. newsletter-launch-2026)."""
     parts: list[str] = []
     for key in _UTM_KEYS:
-        cleaned = _UTM_CLEAN_RE.sub("-", request.query_params.get(key, "").strip().lower()).strip("-")
+        cleaned = _UTM_CLEAN_RE.sub("-", request.query_params.get(key, "").strip().lower()).strip(
+            "-"
+        )
         if cleaned:
             parts.append(cleaned[:24])
     if not parts:
@@ -187,7 +192,8 @@ _limiter = RateLimiter(get_settings().rate_limit)
 
 
 def _identity(request: Request) -> tuple[str, str]:
-    """(ip_hash, country) per request; unresolvable IPs hash as anon so they don't share one bucket."""
+    """(ip_hash, country) per request; unresolvable IPs hash as anon so they don't
+    share one bucket."""
     ip = _client_ip(request)
     if not ip:
         return salt.hash_ip(f"anon-{time.time_ns()}"), "XX"
@@ -238,10 +244,8 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(retention_loop())
     yield
     task.cancel()
-    try:
+    with suppress(asyncio.CancelledError):
         await task
-    except asyncio.CancelledError:
-        pass
     await salt.stop_rotation_loop()
     get_geo().close()
     await db.close_db()
@@ -259,16 +263,17 @@ app.add_middleware(
 class BodyLimitMiddleware:
     """Reject POST/PUT/PATCH bodies over `max_bytes` (413) before parsing; chunked-safe."""
 
-    def __init__(self, app, max_bytes: int = 4096) -> None:
+    def __init__(self, app: ASGIApp, max_bytes: int = 4096) -> None:
         self.app = app
         self.max_bytes = max_bytes
 
-    async def __call__(self, scope, receive, send):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("method") not in ("POST", "PUT", "PATCH"):
             await self.app(scope, receive, send)
             return
         declared: int | None = None
-        for name, value in scope.get("headers", []):
+        headers: Iterable[tuple[bytes, bytes]] = scope.get("headers", [])
+        for name, value in headers:
             if name == b"content-length":
                 try:
                     declared = int(value)
@@ -288,7 +293,7 @@ class BodyLimitMiddleware:
             message = await receive()
             if message["type"] != "http.request":
                 break
-            chunk = message.get("body", b"")
+            chunk: bytes = message.get("body", b"")
             total += len(chunk)
             if total > self.max_bytes:
                 await self._reject(scope, receive, send)
@@ -299,7 +304,7 @@ class BodyLimitMiddleware:
         body = b"".join(chunks)
         sent = False
 
-        async def replay():
+        async def replay() -> MutableMapping[str, Any]:
             nonlocal sent
             if sent:
                 return {"type": "http.request", "body": b"", "more_body": False}
@@ -308,7 +313,7 @@ class BodyLimitMiddleware:
 
         await self.app(scope, replay, send)
 
-    async def _reject(self, scope, receive, send) -> None:
+    async def _reject(self, scope: Scope, receive: Receive, send: Send) -> None:
         resp = _no_store(JSONResponse({"ok": False, "error": "payload too large"}, status_code=413))
         await resp(scope, receive, send)
 
@@ -323,7 +328,7 @@ async def _validation_no_store(request: Request, exc: RequestValidationError) ->
 
 
 @app.get("/healthz")
-async def healthz() -> dict:
+async def healthz() -> dict[str, bool]:
     return {"ok": True}
 
 
@@ -357,11 +362,17 @@ async def index() -> JSONResponse:
 
 @app.get("/pixel/{doc_key}", include_in_schema=False)
 @app.get("/pixel/{doc_key}.svg", include_in_schema=False)
-async def pixel(doc_key: str, request: Request, background: BackgroundTasks, ref: str = "") -> Response:
+async def pixel(
+    doc_key: str, request: Request, background: BackgroundTasks, ref: str = ""
+) -> Response:
     if not _valid_doc(doc_key):
         return _invalid_doc_error()
     # Over-limit views are silently dropped: an <img> can't render a 429.
-    if _tracking_allowed(request) and _counts_as_human(request) and _limiter.allow(_socket_ip(request)):
+    if (
+        _tracking_allowed(request)
+        and _counts_as_human(request)
+        and _limiter.allow(_socket_ip(request))
+    ):
         background.add_task(_record_view, doc_key, request, ref)
     return _no_store(Response(PIXEL_SVG, media_type="image/svg+xml"))
 
@@ -386,7 +397,11 @@ async def embed(
 ) -> Response:
     if not _valid_doc(doc_key):
         return _invalid_doc_error()
-    if _tracking_allowed(request) and _counts_as_human(request) and _limiter.allow(_socket_ip(request)):
+    if (
+        _tracking_allowed(request)
+        and _counts_as_human(request)
+        and _limiter.allow(_socket_ip(request))
+    ):
         background.add_task(_record_view, doc_key, request)
     views = await _view_count_safe(doc_key)
     forced = theme if theme in ("light", "dark") else ""  # empty = follow the OS
@@ -414,8 +429,7 @@ def _embed_csp() -> str:
         "default-src 'none'; "
         "script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
         "img-src 'self' data:; connect-src 'self'; "
-        "form-action 'none'; base-uri 'none'; "
-        + ancestors
+        "form-action 'none'; base-uri 'none'; " + ancestors
     )
 
 
@@ -432,7 +446,9 @@ async def heartbeat(doc_key: str, beat: Heartbeat, request: Request) -> JSONResp
     if not _limiter.allow(_socket_ip(request)):
         return _no_store(
             JSONResponse(
-                {"ok": False, "error": "rate limited"}, status_code=429, headers={"Retry-After": "60"}
+                {"ok": False, "error": "rate limited"},
+                status_code=429,
+                headers={"Retry-After": "60"},
             )
         )
     await _record_event(doc_key, request, "heartbeat", dwell_seconds=beat.t)
@@ -467,7 +483,8 @@ async def badge(doc_key: str, label: str = "", labelColor: str = "", color: str 
         f'aria-label="{_escape(text)}">'
         f'<rect width="{w}" height="20" rx="10" fill="{bg}"/>'
         f'<circle cx="10" cy="10" r="3.5" fill="#46a758"/>'
-        f'<text x="18" y="14" font-family="Inter,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" '
+        f'<text x="18" y="14" font-family="Inter,-apple-system,Segoe UI,Helvetica,'
+        f'Arial,sans-serif" '
         f'font-size="11" fill="{fg}">{_escape(text)}</text></svg>'
     )
     return _no_store(Response(svg, media_type="image/svg+xml"))
@@ -480,12 +497,11 @@ def _parse_date(value: str) -> str | None:
     """Return the value when it is a sane YYYY-MM-DD, else None."""
     if not _DATE_RE.match(value):
         return None
-    from datetime import date
-
     try:
-        return value if date.fromisoformat(value) else None
+        date.fromisoformat(value)
     except ValueError:
         return None
+    return value
 
 
 def _validated_dates(since: str, to: str) -> tuple[str, str] | JSONResponse:
@@ -508,8 +524,13 @@ def _stats_authorized(token: str) -> bool:
 
 @app.get("/stats/{doc_key}", response_model=DocStats)
 async def stats(
-    doc_key: str, request: Request, response: Response, token: str = "", since: str = "", to: str = ""
-) -> DocStats:
+    doc_key: str,
+    request: Request,
+    response: Response,
+    token: str = "",
+    since: str = "",
+    to: str = "",
+) -> DocStats | JSONResponse:
     if not _valid_doc(doc_key):
         return _no_store(JSONResponse({"ok": False, "error": "invalid doc key"}, status_code=400))
     if not _stats_authorized(_stats_token(request, token)):
@@ -530,7 +551,7 @@ async def stats(
 @app.get("/overview", response_model=OverviewResponse)
 async def overview(
     request: Request, response: Response, token: str = "", prefix: str = ""
-) -> OverviewResponse:
+) -> OverviewResponse | JSONResponse:
     """Per-doc totals for the whole site, busiest first. Optional `prefix` scopes to one site."""
     if prefix and not _valid_doc(prefix):
         return _no_store(JSONResponse({"ok": False, "error": "invalid prefix"}, status_code=400))
@@ -540,7 +561,9 @@ async def overview(
         docs = await db.get_overview(prefix or None)
     except SQLAlchemyError:
         log.exception("overview failed")
-        return _no_store(JSONResponse({"ok": False, "error": "overview unavailable"}, status_code=500))
+        return _no_store(
+            JSONResponse({"ok": False, "error": "overview unavailable"}, status_code=500)
+        )
     _no_store(response)
     return OverviewResponse(docs=[DocOverview(**d) for d in docs], count=len(docs))
 
@@ -578,7 +601,9 @@ def _stats_token(request: Request, query_token: str) -> str:
 
 
 @app.delete("/docs/{doc_key}", response_model=ErasureResult)
-async def delete_doc(doc_key: str, request: Request, response: Response, token: str = "") -> ErasureResult:
+async def delete_doc(
+    doc_key: str, request: Request, response: Response, token: str = ""
+) -> ErasureResult | JSONResponse:
     """GDPR Art. 17 erasure: hard-delete every stored event for one doc.
 
     Requires STATS_TOKEN to be configured AND supplied, so a public collector
