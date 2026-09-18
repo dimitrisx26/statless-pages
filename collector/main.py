@@ -428,7 +428,11 @@ async def heartbeat(doc_key: str, beat: Heartbeat, request: Request) -> JSONResp
     if not _tracking_allowed(request) or not _counts_as_human(request):
         return _no_store(JSONResponse({"ok": True, "tracked": False}))
     if not _limiter.allow(_socket_ip(request)):
-        return _no_store(JSONResponse({"ok": False, "error": "rate limited"}, status_code=429))
+        return _no_store(
+            JSONResponse(
+                {"ok": False, "error": "rate limited"}, status_code=429, headers={"Retry-After": "60"}
+            )
+        )
     await _record_event(doc_key, request, "heartbeat", dwell_seconds=beat.t)
     return _no_store(JSONResponse({"ok": True, "t": beat.t}))
 
@@ -608,12 +612,11 @@ async def robots() -> Response:
 
 @app.get("/.well-known/security.txt", include_in_schema=False)
 async def security_txt() -> Response:
-    body = (
-        "Contact: mailto:security@YOUR-DOMAIN.example\n"
-        "Preferred-Languages: en\n"
-        "Policy: https://YOUR-DOMAIN.example/.well-known/security.txt\n"
-    )
-    resp = _no_store(Response(body, media_type="text/plain; charset=utf-8"))
+    s = get_settings()
+    lines = [f"Contact: {s.security_contact}", "Preferred-Languages: en"]
+    if s.security_policy:
+        lines.append(f"Policy: {s.security_policy}")
+    resp = _no_store(Response("\n".join(lines) + "\n", media_type="text/plain; charset=utf-8"))
     resp.headers["X-Content-Type-Options"] = "nosniff"
     return resp
 
