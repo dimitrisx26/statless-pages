@@ -244,11 +244,12 @@ curl http://localhost:8000/stats/q3-roadmap
 | `GET` | `/embed/{doc_key}` | ~2.8KB HTML embed widget (badge + dwell heartbeats). Optional `?theme=light\|dark` forces a palette (default: follows the OS). `CSP: frame-ancestors` allow-list (Notion domains by default; configurable via `EMBED_ALLOWED_ORIGINS`) |
 | `POST` | `/heartbeat/{doc_key}` | JSON `{"t": 15\|30\|60\|120}` via `navigator.sendBeacon`. Bodies > 4 KB get `413`; `429` past the rate limit |
 | `GET` | `/badge/{doc_key}.svg` | Counter badge for READMEs. Display-only: does not record views; pair with a pixel if you want fetches counted. Customize with `?label=` (up to 40 chars, `[A-Za-z0-9 _.-]`), `?labelColor=RRGGBB`, `?color=RRGGBB` |
-| `GET` | `/stats/{doc_key}` | JSON: views, uniques, daily time-series, dwell buckets, top countries/referrers/devices. **Public by default** - set `STATS_TOKEN` to require `?token=...`. Filter with `?since=YYYY-MM-DD&to=YYYY-MM-DD` (inclusive UTC dates) |
+| `GET` | `/stats/{doc_key}` | JSON: views, uniques, daily time-series, dwell buckets, top countries/referrers/devices. **Public by default** - set `STATS_TOKEN` to require `?token=...` or the `X-Stats-Token` header (header preferred - query strings end up in access logs). Filter with `?since=YYYY-MM-DD&to=YYYY-MM-DD` (inclusive UTC dates) |
 | `GET` | `/overview` | JSON: per-doc totals for the whole site, busiest first (`doc`, `events`, `views`, `uniques`, `last_ts`). `?prefix=` scopes to a `doc_key` prefix, e.g. all of one Notion space (`site-`). Same `STATS_TOKEN` gate as `/stats` |
-| `GET` | `/export/{doc_key}` | NDJSON dump of all raw event rows for one doc (oldest first; same `STATS_TOKEN` gate). Portable backup / GDPR Art. 15/20 data access |
+| `GET` | `/export/{doc_key}` | NDJSON dump of raw event rows for one doc (oldest first, streamed; same `STATS_TOKEN` gate). Portable backup / GDPR Art. 15/20 data access. When stats are public (no `STATS_TOKEN`), the visitor pseudonym (`ip_hash`) and the fingerprint-capable `ua` column are omitted - pseudonymous data is still personal data under GDPR, so the per-visitor trail is only published to token holders |
+| `DELETE` | `/docs/{doc_key}` | GDPR Art. 17 erasure: hard-delete every stored event for one doc. Requires `STATS_TOKEN` to be configured AND supplied; with no token configured the endpoint always refuses (`403`) |
 | `GET` | `/privacy` | Human-readable privacy notice: exactly what's stored, retention, opt-out, legal position |
-| `GET` | `/robots.txt`, `/.well-known/security.txt` | Crawler off-switch (`Disallow: /`) and a disclosure template. `/security.txt` ships "security@YOUR-DOMAIN.example" - replace it with your real contact |
+| `GET` | `/robots.txt`, `/.well-known/security.txt` | Crawler off-switch (`Disallow: /`) and a disclosure template. Configure `SECURITY_CONTACT` (and optionally `SECURITY_POLICY`) - the default contact is a placeholder |
 | `GET` | `/healthz` | Liveness probe |
 
 `doc_key` must match `^[A-Za-z0-9_-]{1,64}$`.
@@ -268,9 +269,11 @@ For local development, set these variables in the process environment. With Dock
 | `SALT_ROTATE_HOURS` | `24` | IP-hash salt rotation window (must be > 0) |
 | `RETENTION_DAYS` | `180` | Auto-delete events older than this. `0` disables automatic deletion (you then own the storage-limitation duty) |
 | `BASE_URL` | `http://localhost:8000` | Rendered into embed/badge snippets |
+| `SECURITY_CONTACT` | `mailto:security@YOUR-DOMAIN.example` | Contact line for `/.well-known/security.txt` - **replace before going public** |
+| `SECURITY_POLICY` | *(empty = omitted)* | Optional `Policy:` URL for `/.well-known/security.txt` (e.g. your vulnerability disclosure policy or ToS). DPA/ToS links are operator-owned; add them here |
 | `TRUST_PROXY` | `false` | Honor `X-Forwarded-For` / `X-Real-IP` for IP **hashing/geo** only. Leave off unless behind a proxy that overwrites these headers - otherwise clients can spoof uniques. The rate limiter always uses the real socket IP, unaffected by this flag. |
 | `RATE_LIMIT` | `120` | Tracked events per minute per client (0 disables). Over-limit pixels are silently dropped; heartbeats get `429`. Keyed on the socket IP, so header spoofing can't evade it. |
-| `STATS_TOKEN` | *(empty = public)* | When set, `GET /stats`, `GET /overview`, and `GET /export` require `?token=<value>` (returns `403` otherwise). Use your tokenized URL yourself - the embed badge links the plain URL, which 403s for everyone else. |
+| `STATS_TOKEN` | *(empty = public)* | When set, `GET /stats`, `GET /overview`, and `GET /export` require `?token=<value>` or the `X-Stats-Token` header (header preferred - query strings end up in access logs). Also gates `DELETE /docs/{doc_key}` (Art. 17). Use your tokenized URL yourself - the embed badge links the plain URL, which 403s for everyone else. |
 | `EMBED_ALLOWED_ORIGINS` | Notion apex + wildcard domains | Comma-separated `https` origins allowed to frame `/embed` (replaces the default list, which also covers the `notion.site` apex/wildcards). A leading `*.` wildcard never matches the apex domain - list both when you need both. `EMBED_ALLOWED_ORIGINS=""` sets `frame-ancestors 'none'` (blocks all framing). |
 | `VIEW_DEDUPE_MINUTES` | `0` (off) | Collapse repeated views of the same page by the same IP-hash within the window (double-loads/prefetches count once). Heartbeats and rate limiting are unaffected. |
 | `FILTER_BOTS` | `true` | Skip crawlers, link-preview/unfurl bots, headless browsers, and `Sec-Purpose: prefetch`/preview fetches so counts reflect humans. Generic HTTP clients (curl, python-requests) are not filtered, so manual tests still count. Set `false` to record everything. |
@@ -325,7 +328,7 @@ Compliance depends on how *you* deploy and document it - this software provides 
 
 - **Automatic:** events older than `RETENTION_DAYS` (default 180) are deleted daily.
 - **Per-doc erasure:** call `await db.purge_doc("doc-key")` to hard-delete every event for one doc (GDPR Art. 17 helper).
-- **Full data access:** `GET /export/{doc_key}` returns one NDJSON row per stored event (subject-subject the same `STATS_TOKEN` gate) - use it for GDPR Art. 15/20 requests and backups.
+- **Full data access:** `GET /export/{doc_key}` returns one streamed NDJSON row per stored event (same `STATS_TOKEN` gate; omits `ip_hash`/`ua` when stats are public) - use it for GDPR Art. 15/20 requests and backups.
 - **Individual erasure limits:** with a rotating salt and no identifiers, the collector generally cannot link stored events back to a person - say so plainly in your privacy notice.
 
 ---
