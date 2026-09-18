@@ -18,5 +18,9 @@ jobs:
         run: uv sync --frozen --extra dev
       - name: Lint
         run: uv run ruff check collector tests
+      - name: Format check
+        run: uv run ruff format --check collector tests
+      - name: Typecheck
+        run: uv run pyright
       - name: Test
         run: uv run pytest -q
