@@ -15,7 +15,8 @@ All settings are overridable via environment variables:
                    (default: Notion apex + wildcard domains). Wildcards never match the apex
                    domain - add both when you need both.
     STATLESS_HOST / STATLESS_PORT  Bind address for the `statless` entrypoint
-                   (namespaced to avoid colliding with shell/CI HOST & PORT; defaults 0.0.0.0 / 8000)
+                   (namespaced to avoid colliding with shell/CI HOST & PORT; defaults
+                   0.0.0.0 / 8000)
     STATS_TOKEN    When set (non-empty), GET /stats, /overview, and /export require
                    ?token=<value> or the X-Stats-Token header (header preferred - query
                    strings end up in access logs). Also gates DELETE /docs/{doc_key}
