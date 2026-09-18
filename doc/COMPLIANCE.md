@@ -71,7 +71,7 @@ and what remains the operator's responsibility:
 | Data minimisation (Art. 5(1)(c)) | No raw IPs, origin-only referrers, 4-value dwell buckets, coarse device labels | Do not add identifiers |
 | Storage limitation (Art. 5(1)(e)) | Daily pruning at `RETENTION_DAYS` (default 180); `0` disables pruning | Set a defensible value; keep `0` off unless deletion is operated manually |
 | Integrity and confidentiality (Art. 32) | Salt exists only in process memory | Serve behind TLS; restrict host access to the data directory |
-| Erasure (Art. 17) | Rotating salt plus no identifiers generally prevents re-identification; `purge_doc()` deletes all events for one doc key | State plainly in the notice that individual erasure is generally not possible |
+| Erasure (Art. 17) | Rotating salt plus no identifiers generally prevents re-identification; `DELETE /docs/{doc_key}` (and `purge_doc()`) deletes all events for one doc key - requires `STATS_TOKEN` to be configured and supplied | State plainly in the notice that individual erasure is generally not possible |
 | Objection and opt-out (Art. 21) | `DNT: 1` and `Sec-GPC: 1` requests are dropped before anything is recorded | Document GPC handling in the notice |
 | Records of processing (Art. 30) | Not provided | Add this collector to your record of processing activities |
 | Controller role | The operator is the sole controller for stored data | Name the controller in the privacy notice |
@@ -89,7 +89,9 @@ does not mistake them for oversights:
 - **Raw User-Agent stored server-side.** The full UA (truncated to 512 chars)
   is stored in the events table, while `/stats` exposes only coarse family
   labels. The `/privacy` notice discloses this. Storing only the classified
-  label would be the stricter minimisation alternative.
+  label would be the stricter minimisation alternative. The public (token-less)
+  `/export` omits both `ip_hash` and `ua` - the per-visitor pseudonym trail is
+  only published to `STATS_TOKEN` holders (GDPR Art. 5(1)(c)).
 
 ## Configurations that change the assessment
 
