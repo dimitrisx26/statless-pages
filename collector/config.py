@@ -17,8 +17,13 @@ All settings are overridable via environment variables:
     STATLESS_HOST / STATLESS_PORT  Bind address for the `statless` entrypoint
                    (namespaced to avoid colliding with shell/CI HOST & PORT; defaults 0.0.0.0 / 8000)
     STATS_TOKEN    When set (non-empty), GET /stats, /overview, and /export require
-                   ?token=<value>. Empty (default) keeps stats public - the embed badge
+                   ?token=<value> or the X-Stats-Token header (header preferred - query
+                   strings end up in access logs). Also gates DELETE /docs/{doc_key}
+                   (Art. 17). Empty (default) keeps stats public - the embed badge
                    links to them.
+    SECURITY_CONTACT  Contact line for /.well-known/security.txt. Replace the mailto
+                   placeholder before going public (default: mailto:security@YOUR-DOMAIN.example)
+    SECURITY_POLICY  Optional Policy URL for /.well-known/security.txt (e.g. your VDP or ToS)
     RETENTION_DAYS Delete events older than this many days (default: 180).
                    0 disables automatic deletion (data is kept indefinitely -
                    you then own the GDPR storage-limitation duty yourself).
@@ -65,6 +70,8 @@ class Settings(BaseSettings):
     geoip_db_path: str = str(ROOT / "data" / "GeoLite2-Country.mmdb")
     salt_rotate_hours: float = Field(default=24.0, gt=0)
     base_url: str = "http://localhost:8000"
+    security_contact: str = "mailto:security@YOUR-DOMAIN.example"
+    security_policy: str = ""
     trust_proxy: bool = False
     rate_limit: int = Field(default=120, ge=0)
     stats_token: str = ""
