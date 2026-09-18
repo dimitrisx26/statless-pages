@@ -68,6 +68,37 @@ def _tracking_allowed(request: Request) -> bool:
     return not any(request.headers.get(header, "").strip() == "1" for header in ("dnt", "sec-gpc"))
 
 
+# Crawlers, link-preview/unfurl bots, headless browsers. Deliberately excludes
+# generic HTTP clients (curl/httr, python-requests) so manual tests still count.
+_BOT_RE = re.compile(
+    r"bot|spider|crawl|slurp|archiver|externalhit|embedly|iframely|preview|"
+    r"validator|lighthouse|headlesschrome|phantomjs|puppeteer|playwright|"
+    r"uptimerobot|pingdom|statuscake|semrush|ahrefs|mj12|dotbot|petal|"
+    r"bytespider|gptbot|ccbot|claudebot|perplexity|feedfetcher|dnygr|"
+    r"yandex|baidu|duckduck",
+    re.IGNORECASE,
+)
+
+
+def _is_bot(request: Request) -> bool:
+    return bool(_BOT_RE.search(request.headers.get("user-agent", "") or ""))
+
+
+def _is_prefetch(request: Request) -> bool:
+    """Speculative loads / link previews that were never actually viewed."""
+    purpose = " ".join(
+        request.headers.get(h, "") for h in ("sec-purpose", "purpose", "x-purpose", "x-moz")
+    ).lower()
+    return "prefetch" in purpose or "prerender" in purpose or "preview" in purpose
+
+
+def _counts_as_human(request: Request) -> bool:
+    """False for bot/preview traffic when FILTER_BOTS is on (default)."""
+    if not get_settings().filter_bots:
+        return True
+    return not _is_bot(request) and not _is_prefetch(request)
+
+
 def _socket_ip(request: Request) -> str:
     """Direct TCP peer - spoof-proof (ignores headers), so the rate limiter keys on this."""
     return request.client.host if request.client else "unknown"
@@ -304,7 +335,7 @@ async def pixel(doc_key: str, request: Request, background: BackgroundTasks, ref
     if not _valid_doc(doc_key):
         return _invalid_doc_error()
     # Over-limit views are silently dropped: an <img> can't render a 429.
-    if _tracking_allowed(request) and _limiter.allow(_socket_ip(request)):
+    if _tracking_allowed(request) and _counts_as_human(request) and _limiter.allow(_socket_ip(request)):
         background.add_task(_record_view, doc_key, request, ref)
     return _no_store(Response(PIXEL_SVG, media_type="image/svg+xml"))
 
@@ -329,7 +360,7 @@ async def embed(
 ) -> Response:
     if not _valid_doc(doc_key):
         return _invalid_doc_error()
-    if _tracking_allowed(request) and _limiter.allow(_socket_ip(request)):
+    if _tracking_allowed(request) and _counts_as_human(request) and _limiter.allow(_socket_ip(request)):
         background.add_task(_record_view, doc_key, request)
     views = await _view_count_safe(doc_key)
     forced = theme if theme in ("light", "dark") else ""  # empty = follow the OS
@@ -370,7 +401,7 @@ class Heartbeat(BaseModel):
 async def heartbeat(doc_key: str, beat: Heartbeat, request: Request) -> JSONResponse:
     if not _valid_doc(doc_key):
         return _no_store(JSONResponse({"ok": False, "error": "invalid doc key"}, status_code=400))
-    if not _tracking_allowed(request):
+    if not _tracking_allowed(request) or not _counts_as_human(request):
         return _no_store(JSONResponse({"ok": True, "tracked": False}))
     if not _limiter.allow(_socket_ip(request)):
         return _no_store(JSONResponse({"ok": False, "error": "rate limited"}, status_code=429))

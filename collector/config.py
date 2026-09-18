@@ -23,6 +23,9 @@ All settings are overridable via environment variables:
                    you then own the GDPR storage-limitation duty yourself).
     VIEW_DEDUPE_MINUTES  Collapse repeated views of the same page by the same
                    IP-hash within the window (default: 0 = every fetch counts).
+    FILTER_BOTS    Skip crawlers, link-preview/unfurl bots, headless browsers,
+                   and preview/prefetch fetches so counts reflect humans
+                   (default: true).
     SERVER_SECRET  Optional. When set, the IP-hash salt is derived deterministically
                    (HMAC of the UTC date), so uniques survive restarts and can be
                    reproduced across replicas sharing the secret.
@@ -66,6 +69,7 @@ class Settings(BaseSettings):
     stats_token: str = ""
     retention_days: NonNegativeInt = 180
     view_dedupe_minutes: NonNegativeInt = 0
+    filter_bots: bool = True
     server_secret: str = ""
     embed_allowed_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: list(DEFAULT_EMBED_ORIGINS)
