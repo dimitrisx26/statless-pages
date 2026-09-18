@@ -6,6 +6,15 @@ import json
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+DESKTOP_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+MOBILE_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+)
+
 
 @pytest.fixture
 async def client(tmp_path):
@@ -149,9 +158,18 @@ async def test_ref_param_rejects_injection(client):
 
 async def test_stats_device_breakdown(client):
     # One desktop Chrome, one iPhone Safari → two buckets, desktop wins ties by count.
-    await client.get("/pixel/dev.svg", headers={"user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"})
-    await client.get("/pixel/dev.svg", headers={"user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"})
-    await client.get("/pixel/dev.svg", headers={"user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"})
+    await client.get(
+        "/pixel/dev.svg",
+        headers={"user-agent": DESKTOP_UA},
+    )
+    await client.get(
+        "/pixel/dev.svg",
+        headers={"user-agent": DESKTOP_UA},
+    )
+    await client.get(
+        "/pixel/dev.svg",
+        headers={"user-agent": MOBILE_UA},
+    )
     data = await _wait_for_views(client, "dev", minimum=3)
     devices = {d["device"]: d["count"] for d in data["devices"]}
     assert devices == {"desktop-chrome": 2, "mobile-safari": 1}
@@ -219,7 +237,8 @@ def test_rate_limiter_respects_limit_zero_and_reset():
     unlimited = RateLimiter(limit=0, max_ips=3)
     assert all(unlimited.allow(str(i)) for i in range(10))
     limiter = RateLimiter(limit=1, max_ips=3)
-    assert limiter.allow("x") and not limiter.allow("x")
+    assert limiter.allow("x")
+    assert not limiter.allow("x")
     limiter.reset()
     assert limiter.allow("x")
 
@@ -278,14 +297,17 @@ async def test_embed_default_csp_matches_notion_defaults(client):
     csp = r.headers["Content-Security-Policy"]
     # Baseline source policy plus the default frame-ancestors list.
     assert "default-src 'none'" in csp
-    assert "connect-src 'self'" in csp and "form-action 'none'" in csp
+    assert "connect-src 'self'" in csp
+    assert "form-action 'none'" in csp
     assert "frame-ancestors " + " ".join(DEFAULT_EMBED_ORIGINS) + ";" in csp
 
 
 async def test_embed_custom_origins_replace_csp(client, monkeypatch):
     from collector.config import get_settings
 
-    monkeypatch.setenv("EMBED_ALLOWED_ORIGINS", "https://docs.example.com, https://*.team.example.com")
+    monkeypatch.setenv(
+        "EMBED_ALLOWED_ORIGINS", "https://docs.example.com, https://*.team.example.com"
+    )
     get_settings.cache_clear()
     try:
         r = await client.get("/embed/my-doc")
@@ -316,7 +338,9 @@ async def test_privacy_page_carries_locked_csp(client):
     r = await client.get("/privacy")
     assert r.status_code == 200
     csp = r.headers["Content-Security-Policy"]
-    assert csp == "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'"
+    assert (
+        csp == "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'"
+    )
 
 
 async def test_responses_carry_referrer_policy(client):
@@ -330,7 +354,7 @@ def test_embed_rejects_invalid_origins(monkeypatch):
     from collector.config import Settings
 
     for bad in ("http://example.com", "https://*example.com", "example.com", "https://a.com/path"):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="invalid embed origin"):
             Settings(embed_allowed_origins=[bad])
 
 
@@ -353,7 +377,8 @@ async def test_retention_deletes_old_events_only(client):
     async with database.get_engine().begin() as conn:
         old_cutoff = datetime.now(UTC) - timedelta(days=200)
         await conn.execute(
-            database.Event.__table__.update().where(database.Event.doc_key == "old-doc")
+            database.Event.__table__.update()
+            .where(database.Event.doc_key == "old-doc")
             .values(ts=old_cutoff)
         )
     deleted = await database.delete_old_events(180)
@@ -375,7 +400,9 @@ async def test_purge_doc_erases_all_events_for_key(client):
     from collector import database
 
     await database.log_event(doc_key="erase-me", ip_hash="d" * 32)
-    await database.log_event(doc_key="erase-me", ip_hash="e" * 32, kind="heartbeat", dwell_seconds=15)
+    await database.log_event(
+        doc_key="erase-me", ip_hash="e" * 32, kind="heartbeat", dwell_seconds=15
+    )
     await database.log_event(doc_key="keep-me", ip_hash="f" * 32)
     deleted = await database.purge_doc("erase-me")
     assert deleted == 2
@@ -386,7 +413,7 @@ async def test_purge_doc_erases_all_events_for_key(client):
 def test_retention_days_rejects_negative(monkeypatch):
     from collector.config import Settings
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="greater than or equal to 0"):
         Settings(retention_days=-1)
 
 
@@ -403,7 +430,9 @@ async def test_stats_date_range_filters(client):
             .where(database.Event.doc_key == "range-doc")
             .values(ts=week_ago)
         )
-    await database.log_event(doc_key="range-doc", ip_hash="b" * 32, kind="heartbeat", dwell_seconds=15)
+    await database.log_event(
+        doc_key="range-doc", ip_hash="b" * 32, kind="heartbeat", dwell_seconds=15
+    )
 
     data = (await client.get("/stats/range-doc")).json()
     assert data["events"] == 2
@@ -419,9 +448,10 @@ async def test_stats_date_range_filters(client):
 
     to = (datetime.now(UTC) - timedelta(days=5)).strftime("%Y-%m-%d")
     old = (await client.get(f"/stats/range-doc?to={to}")).json()
-    assert old["events"] == 1 and old["views"] == 1
+    assert old["events"] == 1
+    assert old["views"] == 1
 
-    both = (await client.get(f"/stats/range-doc?since={since}&to={to}"))
+    both = await client.get(f"/stats/range-doc?since={since}&to={to}")
     assert both.status_code == 400  # since after to is rejected up front
 
 
@@ -435,7 +465,8 @@ async def test_badge_custom_label_and_color(client):
     assert r.status_code == 200
     svg = r.text
     assert ">Testing" in svg or ">Testing<" in svg
-    assert "6A5ACD" in svg and "ABCDEF" in svg
+    assert "6A5ACD" in svg
+    assert "ABCDEF" in svg
 
 
 async def test_badge_rejects_bad_label_and_color(client):
@@ -468,7 +499,9 @@ async def test_export_jsonl_gated_by_stats_token(client, monkeypatch):
     from collector.config import get_settings
 
     await database.log_event(doc_key="exp-doc", ip_hash="a" * 32)
-    await database.log_event(doc_key="exp-doc", ip_hash="b" * 32, kind="heartbeat", dwell_seconds=15)
+    await database.log_event(
+        doc_key="exp-doc", ip_hash="b" * 32, kind="heartbeat", dwell_seconds=15
+    )
     await database.log_event(doc_key="other-doc", ip_hash="c" * 32)
 
     monkeypatch.setenv("STATS_TOKEN", "shh")
@@ -482,7 +515,8 @@ async def test_export_jsonl_gated_by_stats_token(client, monkeypatch):
         assert len(lines) == 2
         rows = [json.loads(line) for line in lines]
         assert {row["doc_key"] for row in rows} == {"exp-doc"}
-        assert "ip_hash" in rows[0] and "raw_ip" not in rows[0]
+        assert "ip_hash" in rows[0]
+        assert "raw_ip" not in rows[0]
 
         # Header auth must work too (keeps the token out of access logs).
         r = await client.get("/export/exp-doc", headers={"X-Stats-Token": "shh"})
@@ -595,7 +629,9 @@ async def test_bot_user_agent_is_not_tracked(client):
 
     await client.get(
         "/pixel/bot-doc.svg",
-        headers={"user-agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"},
+        headers={
+            "user-agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+        },
     )
     await client.get("/pixel/bot-doc.svg", headers={"user-agent": "Slackbot-LinkExpanding 1.0"})
     await asyncio.sleep(0.1)
@@ -612,7 +648,9 @@ async def test_preview_and_prefetch_headers_are_not_tracked(client):
 
 
 async def test_bot_heartbeat_reports_not_tracked(client):
-    r = await client.post("/heartbeat/bot-hb", json={"t": 15}, headers={"user-agent": "AhrefsBot/7.0"})
+    r = await client.post(
+        "/heartbeat/bot-hb", json={"t": 15}, headers={"user-agent": "AhrefsBot/7.0"}
+    )
     assert r.status_code == 200
     assert r.json() == {"ok": True, "tracked": False}
 
