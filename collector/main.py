@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -26,7 +27,7 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
@@ -544,18 +545,25 @@ async def overview(token: str = "", prefix: str = "") -> JSONResponse:
 
 
 @app.get("/export/{doc_key}", include_in_schema=False)
-async def export(doc_key: str, token: str = "") -> Response:
+async def export(doc_key: str, request: Request, token: str = "") -> Response:
     if not _valid_doc(doc_key):
         return _no_store(JSONResponse({"ok": False, "error": "invalid doc key"}, status_code=400))
-    if not _stats_authorized(token):
+    if not _stats_authorized(_stats_token(request, token)):
         return _no_store(JSONResponse({"ok": False, "error": "forbidden"}, status_code=403))
-    try:
-        rows = await db.get_export(doc_key)
-    except SQLAlchemyError:
-        log.exception("export failed for %s", doc_key)
-        return _no_store(JSONResponse({"ok": False, "error": "export unavailable"}, status_code=500))
-    body = "\n".join(json.dumps(row, separators=(",", ":")) for row in rows) + ("\n" if rows else "")
-    resp = _no_store(Response(body, media_type="application/x-ndjson"))
+
+    async def ndjson() -> AsyncIterator[bytes]:
+        # Streams row-by-row so a huge doc cannot buffer the whole table in memory.
+        # When stats are public the visitor pseudonym (ip_hash) and the
+        # fingerprint-capable ua column are omitted: they are pseudonymous, but
+        # still personal data under GDPR - publish them only to token holders.
+        include_identity = bool(get_settings().stats_token)
+        try:
+            async for row in db.iter_export(doc_key, include_identity=include_identity):
+                yield (json.dumps(row, separators=(",", ":")) + "\n").encode()
+        except SQLAlchemyError:
+            log.exception("export failed for %s", doc_key)
+
+    resp = _no_store(StreamingResponse(ndjson(), media_type="application/x-ndjson"))
     resp.headers["Content-Disposition"] = f'attachment; filename="{doc_key}.ndjson"'
     return resp
 
