@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import update
 
 DESKTOP_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -389,9 +390,7 @@ async def test_retention_deletes_old_events_only(client: AsyncClient) -> None:
     async with database.get_engine().begin() as conn:
         old_cutoff = datetime.now(UTC) - timedelta(days=200)
         await conn.execute(
-            database.Event.__table__.update()
-            .where(database.Event.doc_key == "old-doc")
-            .values(ts=old_cutoff)
+            update(database.Event).where(database.Event.doc_key == "old-doc").values(ts=old_cutoff)
         )
     deleted = await database.delete_old_events(180)
     assert deleted == 1
@@ -438,9 +437,7 @@ async def test_stats_date_range_filters(client: AsyncClient) -> None:
     async with database.get_engine().begin() as conn:
         week_ago = datetime.now(UTC) - timedelta(days=7)
         await conn.execute(
-            database.Event.__table__.update()
-            .where(database.Event.doc_key == "range-doc")
-            .values(ts=week_ago)
+            update(database.Event).where(database.Event.doc_key == "range-doc").values(ts=week_ago)
         )
     await database.log_event(
         doc_key="range-doc", ip_hash="b" * 32, kind="heartbeat", dwell_seconds=15
