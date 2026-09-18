@@ -12,7 +12,8 @@ WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:0.12.15 /uv /usr/local/bin/uv
 
 # Dependency layer: only pyproject + lock invalidate it
-COPY pyproject.toml uv.lock ./
+# (README.md is required by hatchling's readme metadata, so it goes in this layer too)
+COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY collector ./collector
