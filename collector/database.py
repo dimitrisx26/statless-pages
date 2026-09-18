@@ -19,11 +19,31 @@ SQLite is the default (zero-config single file). Point ``DATABASE_URL`` at
 from __future__ import annotations
 
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
-from sqlalchemy import DateTime, Index, Integer, String, and_, case, delete, distinct, func, select
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy import (
+    ColumnElement,
+    CursorResult,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    and_,
+    case,
+    delete,
+    distinct,
+    func,
+    select,
+)
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -50,7 +70,16 @@ class Event(Base):
 
 
 _engine: AsyncEngine | None = None
-_session_factory: async_sessionmaker | None = None
+_session_factory: async_sessionmaker[AsyncSession] | None = None
+
+
+@asynccontextmanager
+async def _session() -> AsyncGenerator[AsyncSession]:
+    """Yield a session, or raise if init_db() has not run (no assert - survives -O)."""
+    if _session_factory is None:
+        raise RuntimeError("call init_db() first")
+    async with _session_factory() as session:
+        yield session
 
 
 def get_engine() -> AsyncEngine:
@@ -60,7 +89,7 @@ def get_engine() -> AsyncEngine:
         from .config import get_settings
 
         url = get_settings().database_url
-        kwargs: dict = {}
+        kwargs: dict[str, Any] = {}
         if url.startswith("sqlite"):
             kwargs = {"connect_args": {"check_same_thread": False}}
         _engine = create_async_engine(url, pool_pre_ping=True, **kwargs)
@@ -103,18 +132,21 @@ async def delete_old_events(retention_days: int) -> int:
     if retention_days <= 0:
         return 0
     cutoff = datetime.now(UTC) - timedelta(days=retention_days)
-    assert _session_factory is not None, "call init_db() first"
-    async with _session_factory() as session:
-        result = await session.execute(delete(Event).where(Event.ts < cutoff))
+    async with _session() as session:
+        result = cast(
+            "CursorResult[Any]", await session.execute(delete(Event).where(Event.ts < cutoff))
+        )
         await session.commit()
         return int(result.rowcount or 0)
 
 
 async def purge_doc(doc_key: str) -> int:
     """Hard-delete all events for one doc_key (Art. 17 erasure helper)."""
-    assert _session_factory is not None, "call init_db() first"
-    async with _session_factory() as session:
-        result = await session.execute(delete(Event).where(Event.doc_key == doc_key))
+    async with _session() as session:
+        result = cast(
+            "CursorResult[Any]",
+            await session.execute(delete(Event).where(Event.doc_key == doc_key)),
+        )
         await session.commit()
         return int(result.rowcount or 0)
 
@@ -158,7 +190,7 @@ _DEVICE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 
 def classify_device(ua: str) -> str:
-    """Map a User-Agent to a coarse family label (mobile/desktop × browser family)."""
+    """Map a User-Agent to a coarse family label (mobile/desktop x browser family)."""
     lowered = (ua or "").lower()
     for label, tokens in _DEVICE_RULES:
         if all(token in lowered for token in tokens):
@@ -181,8 +213,7 @@ async def log_event(
     dedupe_minutes > 0 collapses repeated views of the same doc by the same
     ip_hash within the window (rapid double-loads, prefetches) into one.
     """
-    assert _session_factory is not None, "call init_db() first"
-    async with _session_factory() as session:
+    async with _session() as session:
         if dedupe_minutes > 0:
             cutoff = datetime.now(UTC) - timedelta(minutes=dedupe_minutes)
             shared = (
@@ -216,8 +247,7 @@ async def log_event(
 
 async def get_view_count(doc_key: str) -> int:
     """Lightweight single-query count for the embed badge."""
-    assert _session_factory is not None, "call init_db() first"
-    async with _session_factory() as session:
+    async with _session() as session:
         return (
             await session.execute(
                 select(func.count())
@@ -229,8 +259,7 @@ async def get_view_count(doc_key: str) -> int:
 
 async def count_events(doc_key: str) -> int:
     """Total tracked events for one doc (test/debug helper)."""
-    assert _session_factory is not None, "call init_db() first"
-    async with _session_factory() as session:
+    async with _session() as session:
         return (
             await session.execute(
                 select(func.count()).select_from(Event).where(Event.doc_key == doc_key)
@@ -238,9 +267,7 @@ async def count_events(doc_key: str) -> int:
         ).scalar() or 0
 
 
-async def iter_export(
-    doc_key: str, include_identity: bool = True
-) -> AsyncIterator[dict]:
+async def iter_export(doc_key: str, include_identity: bool = True) -> AsyncIterator[dict[str, Any]]:
     """Raw event rows for one doc, oldest first, streamed (JSONL export, Art. 15/20 access).
 
     Streaming keeps memory flat no matter how many events a doc has.
@@ -248,18 +275,24 @@ async def iter_export(
     fingerprint-capable ``ua`` column - used when stats are public, so the
     per-visitor pseudonym trail is only published to token holders.
     """
-    assert _session_factory is not None, "call init_db() first"
     fields = ["ts", "doc_key", "country", "referrer", "kind", "dwell_seconds"]
-    columns = [Event.ts, Event.doc_key, Event.country, Event.referrer, Event.kind, Event.dwell_seconds]
+    columns = [
+        Event.ts,
+        Event.doc_key,
+        Event.country,
+        Event.referrer,
+        Event.kind,
+        Event.dwell_seconds,
+    ]
     if include_identity:
         fields[2:2] = ["ip_hash", "ua"]
         columns[2:2] = [Event.ip_hash, Event.ua]
-    async with _session_factory() as session:
+    async with _session() as session:
         result = await session.stream(
             select(*columns).where(Event.doc_key == doc_key).order_by(Event.ts)
         )
         async for row in result:
-            out: dict = {}
+            out: dict[str, Any] = {}
             for name, value in zip(fields, row, strict=True):
                 if name == "ts":
                     out["ts"] = value.isoformat() if hasattr(value, "isoformat") else str(value)
@@ -273,7 +306,7 @@ def _like_prefix(prefix: str) -> str:
     return prefix.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
 
 
-def _utc_day_expr():
+def _utc_day_expr() -> ColumnElement[Any]:
     """SQL expression for the UTC calendar day of ``Event.ts``.
 
     SQLite stores UTC ISO strings, so ``date(ts)`` is already UTC. On Postgres,
@@ -286,9 +319,8 @@ def _utc_day_expr():
     return func.date(Event.ts)
 
 
-async def get_overview(prefix: str | None = None) -> list[dict]:
+async def get_overview(prefix: str | None = None) -> list[dict[str, Any]]:
     """Per-doc totals across the whole site, busiest first (optional doc-key prefix)."""
-    assert _session_factory is not None, "call init_db() first"
     views = func.sum(case((Event.kind == "view", 1), else_=0)).label("views")
     stmt = (
         select(
@@ -303,7 +335,7 @@ async def get_overview(prefix: str | None = None) -> list[dict]:
     )
     if prefix:
         stmt = stmt.where(Event.doc_key.like(_like_prefix(prefix) + "%", escape="\\"))
-    async with _session_factory() as session:
+    async with _session() as session:
         rows = (await session.execute(stmt)).all()
     return [
         {
@@ -321,13 +353,12 @@ async def get_stats(
     doc_key: str,
     since: str | None = None,
     to: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Aggregate counts for a doc: totals, dwell, daily time-series, top countries/referrers.
 
     since/to are inclusive UTC date bounds (YYYY-MM-DD), validated by the route.
     One conditional-aggregation query for totals, then four GROUP BYs.
     """
-    assert _session_factory is not None, "call init_db() first"
     conditions = [Event.doc_key == doc_key]
     if since:
         conditions.append(Event.ts >= datetime.fromisoformat(since).replace(tzinfo=UTC))
@@ -335,7 +366,7 @@ async def get_stats(
         upper = datetime.fromisoformat(to).replace(tzinfo=UTC) + timedelta(days=1)
         conditions.append(Event.ts < upper)
     where = and_(*conditions)
-    async with _session_factory() as session:
+    async with _session() as session:
         total, views, uniques = (
             await session.execute(
                 select(
@@ -385,7 +416,7 @@ async def get_stats(
             )
         ).all()
 
-        daily: dict[str, dict] = {}
+        daily: dict[str, dict[str, Any]] = {}
         for day, kind, dwell, n, uniq in daily_rows:
             day_bucket = daily.setdefault(str(day), {"views": 0, "uniques": 0, "heartbeats": {}})
             if kind == "view":
