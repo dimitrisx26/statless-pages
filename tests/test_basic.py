@@ -530,3 +530,96 @@ def test_secret_salt_is_deterministic_within_rotation_window(monkeypatch):
 async def test_security_txt_and_robots_no_store(client):
     r = await client.get("/robots.txt")
     assert r.headers["Cache-Control"].startswith("no-store")
+
+
+async def test_bot_user_agent_is_not_tracked(client):
+    from collector import database
+
+    await client.get(
+        "/pixel/bot-doc.svg",
+        headers={"user-agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"},
+    )
+    await client.get("/pixel/bot-doc.svg", headers={"user-agent": "Slackbot-LinkExpanding 1.0"})
+    await asyncio.sleep(0.1)
+    assert await database.count_events("bot-doc") == 0
+
+
+async def test_preview_and_prefetch_headers_are_not_tracked(client):
+    from collector import database
+
+    await client.get("/pixel/prefetch-doc.svg", headers={"sec-purpose": "prefetch"})
+    await client.get("/pixel/prefetch-doc.svg", headers={"x-purpose": "preview"})
+    await asyncio.sleep(0.1)
+    assert await database.count_events("prefetch-doc") == 0
+
+
+async def test_bot_heartbeat_reports_not_tracked(client):
+    r = await client.post("/heartbeat/bot-hb", json={"t": 15}, headers={"user-agent": "AhrefsBot/7.0"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "tracked": False}
+
+
+async def test_filter_bots_can_be_disabled(client, monkeypatch):
+    from collector import database
+    from collector.config import get_settings
+
+    monkeypatch.setenv("FILTER_BOTS", "false")
+    get_settings.cache_clear()
+    try:
+        await client.get("/pixel/bot-kept.svg", headers={"user-agent": "Googlebot/2.1"})
+        for _ in range(20):
+            if await database.count_events("bot-kept") >= 1:
+                break
+            await asyncio.sleep(0.1)
+        assert await database.count_events("bot-kept") == 1
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_utm_params_become_ref_tag(client):
+    await client.get(
+        "/pixel/utm-doc.svg?utm_source=Newsletter&utm_medium=email&utm_campaign=Launch%202026"
+    )
+    data = await _wait_for_views(client, "utm-doc")
+    assert [r["referrer"] for r in data["referrers"]] == ["newsletter-email-launch-2026"]
+
+
+async def test_explicit_ref_beats_utm(client):
+    await client.get("/pixel/utm-ref.svg?ref=explicit&utm_source=newsletter")
+    data = await _wait_for_views(client, "utm-ref")
+    assert [r["referrer"] for r in data["referrers"]] == ["explicit"]
+
+
+async def test_overview_lists_docs_and_scopes_by_prefix(client):
+    from collector import database
+
+    await database.log_event(doc_key="site-a", ip_hash="a" * 32)
+    await database.log_event(doc_key="site-a", ip_hash="b" * 32)
+    await database.log_event(doc_key="site-a", ip_hash="a" * 32, kind="heartbeat", dwell_seconds=15)
+    await database.log_event(doc_key="site_a", ip_hash="e" * 32)
+    await database.log_event(doc_key="other-c", ip_hash="d" * 32)
+
+    body = (await client.get("/overview")).json()
+    docs = {d["doc"]: d for d in body["docs"]}
+    assert body["count"] == 3
+    assert docs["site-a"]["views"] == 2
+    assert docs["site-a"]["events"] == 3
+    assert docs["site-a"]["uniques"] == 2
+    assert docs["site-a"]["last_ts"]
+
+    # `_` is a LIKE wildcard: escaping must keep site_ from also matching site-a.
+    scoped = (await client.get("/overview?prefix=site_")).json()
+    assert {d["doc"] for d in scoped["docs"]} == {"site_a"}
+
+
+async def test_overview_rejects_bad_prefix_and_gates_token(client, monkeypatch):
+    from collector.config import get_settings
+
+    assert (await client.get("/overview?prefix=bad..key")).status_code == 400
+    monkeypatch.setenv("STATS_TOKEN", "shh")
+    get_settings.cache_clear()
+    try:
+        assert (await client.get("/overview")).status_code == 403
+        assert (await client.get("/overview?token=shh")).status_code == 200
+    finally:
+        get_settings.cache_clear()
