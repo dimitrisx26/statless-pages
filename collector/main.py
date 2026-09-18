@@ -117,10 +117,30 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
+_UTM_KEYS = ("utm_source", "utm_medium", "utm_campaign")
+_UTM_CLEAN_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _utm_tag(request: Request) -> str:
+    """Collapse allow-listed UTM params into one approved tag (e.g. newsletter-launch-2026)."""
+    parts: list[str] = []
+    for key in _UTM_KEYS:
+        cleaned = _UTM_CLEAN_RE.sub("-", request.query_params.get(key, "").strip().lower()).strip("-")
+        if cleaned:
+            parts.append(cleaned[:24])
+    if not parts:
+        return ""
+    return "-".join(parts)[:64].strip("-")
+
+
 def _referrer(request: Request, ref: str = "") -> str:
-    """?ref= wins over the Referer header; the db layer normalizes/sanitizes the value."""
-    header = request.headers.get("referer", "") or request.headers.get("referrer", "")
-    return ref or header or ""
+    """?ref= wins, then a UTM tag, then the Referer header; db normalizes the value."""
+    if ref:
+        return ref
+    utm = _utm_tag(request)
+    if utm:
+        return utm
+    return request.headers.get("referer", "") or request.headers.get("referrer", "") or ""
 
 
 class RateLimiter:
