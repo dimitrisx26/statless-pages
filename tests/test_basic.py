@@ -57,11 +57,13 @@ async def test_heartbeat_rejects_bad_bucket(client):
 
 
 async def test_embed_has_csp_and_beacon(client):
+    from collector.config import DEFAULT_EMBED_ORIGINS
+
     r = await client.get("/embed/my-doc")
     assert r.status_code == 200
+    # Ends-with the full allow-list - substring checks can pass on lookalike origins.
     csp = r.headers["Content-Security-Policy"]
-    # Wildcards never match the apex domain - shared Notion pages embed via it.
-    assert "https://notion.so" in csp and "https://*.notion.so" in csp
+    assert csp.endswith("frame-ancestors " + " ".join(DEFAULT_EMBED_ORIGINS) + ";")
     assert "sendBeacon" in r.text
     assert "views" in r.text
 
