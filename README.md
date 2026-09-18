@@ -129,7 +129,7 @@ Check the server at `http://localhost:8000/healthz`. It should return `{"ok":tru
 
 Replace `https://YOUR-HOST` in the examples with your collector's public HTTPS address. Set `BASE_URL` to that same address before using the embed.
 
-Pick a `doc_key` per page - any slug like `q3-roadmap`, `launch-post`, or `my-repo-readme` (`^[A-Za-z0-9_-]{1,64}$`) - then use one of the integrations below.
+Pick a `doc_key` per page - any slug like `q3-roadmap`, `launch-post`, or `my-repo-readme` (letters, digits, `-` and `_`, up to 64 characters) - then use one of the integrations below.
 
 ### Notion - embed widget (views + dwell time)
 
@@ -243,7 +243,7 @@ curl http://localhost:8000/stats/q3-roadmap
 | `GET` | `/pixel/{doc_key}.svg` | 1×1 transparent SVG. `Cache-Control: no-store …`, `Pragma: no-cache`, `Expires: 0`, `X-Robots-Tag: noindex, nofollow` |
 | `GET` | `/embed/{doc_key}` | ~2.8KB HTML embed widget (badge + dwell heartbeats). Optional `?theme=light\|dark` forces a palette (default: follows the OS). `CSP: frame-ancestors` allow-list (Notion domains by default; configurable via `EMBED_ALLOWED_ORIGINS`) |
 | `POST` | `/heartbeat/{doc_key}` | JSON `{"t": 15\|30\|60\|120}` via `navigator.sendBeacon`. Bodies > 4 KB get `413`; `429` past the rate limit |
-| `GET` | `/badge/{doc_key}.svg` | Counter badge for READMEs. Display-only: does not record views; pair with a pixel if you want fetches counted. Customize with `?label=` (up to 40 chars, `[A-Za-z0-9 _.-]`), `?labelColor=RRGGBB`, `?color=RRGGBB` |
+| `GET` | `/badge/{doc_key}.svg` | Counter badge for READMEs. Display-only: does not record views; pair with a pixel if you want fetches counted. Customize with `?label=` (up to 40 characters: letters, digits, spaces, `. _ -`), `?labelColor=RRGGBB`, `?color=RRGGBB` |
 | `GET` | `/stats/{doc_key}` | JSON: views, uniques, daily time-series, dwell buckets, top countries/referrers/devices. **Public by default** - set `STATS_TOKEN` to require `?token=...` or the `X-Stats-Token` header (header preferred - query strings end up in access logs). Filter with `?since=YYYY-MM-DD&to=YYYY-MM-DD` (inclusive UTC dates) |
 | `GET` | `/overview` | JSON: per-doc totals for the whole site, busiest first (`doc`, `events`, `views`, `uniques`, `last_ts`). `?prefix=` scopes to a `doc_key` prefix, e.g. all of one Notion space (`site-`). Same `STATS_TOKEN` gate as `/stats` |
 | `GET` | `/export/{doc_key}` | NDJSON dump of raw event rows for one doc (oldest first, streamed; same `STATS_TOKEN` gate). Portable backup / GDPR Art. 15/20 data access. When stats are public (no `STATS_TOKEN`), the visitor pseudonym (`ip_hash`) and the fingerprint-capable `ua` column are omitted - pseudonymous data is still personal data under GDPR, so the per-visitor trail is only published to token holders |
@@ -252,7 +252,7 @@ curl http://localhost:8000/stats/q3-roadmap
 | `GET` | `/robots.txt`, `/.well-known/security.txt` | Crawler off-switch (`Disallow: /`) and a disclosure template. Configure `SECURITY_CONTACT` (and optionally `SECURITY_POLICY`) - the default contact is a placeholder |
 | `GET` | `/healthz` | Liveness probe |
 
-`doc_key` must match `^[A-Za-z0-9_-]{1,64}$`.
+`doc_key` may contain letters, digits, `-` and `_` only, and must be 1-64 characters long.
 
 ---
 
