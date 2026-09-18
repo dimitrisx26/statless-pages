@@ -7,6 +7,8 @@ Endpoints:
     GET  /badge/{doc_key}.svg    SVG view counter (for GitHub READMEs)
     GET  /stats/{doc_key}        JSON aggregates for one doc
     GET  /overview               Per-doc totals across the whole site
+    GET  /export/{doc_key}       JSONL dump of raw events (Art. 15/20 data access)
+    DELETE /docs/{doc_key}       Erase all events for one doc (Art. 17, STATS_TOKEN gated)
     GET  /healthz                liveness probe
 """
 
@@ -504,14 +506,6 @@ def _stats_authorized(token: str) -> bool:
     return not expected or hmac.compare_digest(token, expected)
 
 
-def _stats_token(request: Request, query_token: str) -> str:
-    """Token for stats endpoints. Prefers the header (keeps secrets out of access logs).
-
-    The `?token=` query parameter is kept for backwards compatibility.
-    """
-    return request.headers.get("x-stats-token", "").strip() or query_token
-
-
 @app.get("/stats/{doc_key}", response_model=DocStats)
 async def stats(
     doc_key: str, request: Request, response: Response, token: str = "", since: str = "", to: str = ""
@@ -573,6 +567,14 @@ async def export(doc_key: str, request: Request, token: str = "") -> Response:
     resp = _no_store(StreamingResponse(ndjson(), media_type="application/x-ndjson"))
     resp.headers["Content-Disposition"] = f'attachment; filename="{doc_key}.ndjson"'
     return resp
+
+
+def _stats_token(request: Request, query_token: str) -> str:
+    """Token for stats endpoints. Prefers the header (keeps secrets out of access logs).
+
+    The `?token=` query parameter is kept for backwards compatibility.
+    """
+    return request.headers.get("x-stats-token", "").strip() or query_token
 
 
 @app.delete("/docs/{doc_key}", response_model=ErasureResult)
