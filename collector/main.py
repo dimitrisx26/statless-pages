@@ -36,7 +36,7 @@ from . import __version__, salt
 from . import database as db
 from .config import get_settings
 from .geo import get_geo
-from .models import DocStats, OverviewResponse
+from .models import DocOverview, DocStats, ErasureResult, OverviewResponse
 
 log = logging.getLogger(__name__)
 
@@ -529,19 +529,22 @@ async def stats(
     return DocStats(**data)
 
 
-@app.get("/overview")
-async def overview(token: str = "", prefix: str = "") -> JSONResponse:
+@app.get("/overview", response_model=OverviewResponse)
+async def overview(
+    request: Request, response: Response, token: str = "", prefix: str = ""
+) -> OverviewResponse:
     """Per-doc totals for the whole site, busiest first. Optional `prefix` scopes to one site."""
     if prefix and not _valid_doc(prefix):
         return _no_store(JSONResponse({"ok": False, "error": "invalid prefix"}, status_code=400))
-    if not _stats_authorized(token):
+    if not _stats_authorized(_stats_token(request, token)):
         return _no_store(JSONResponse({"ok": False, "error": "forbidden"}, status_code=403))
     try:
         docs = await db.get_overview(prefix or None)
     except SQLAlchemyError:
         log.exception("overview failed")
         return _no_store(JSONResponse({"ok": False, "error": "overview unavailable"}, status_code=500))
-    return _no_store(JSONResponse({"docs": docs, "count": len(docs)}))
+    _no_store(response)
+    return OverviewResponse(docs=[DocOverview(**d) for d in docs], count=len(docs))
 
 
 @app.get("/export/{doc_key}", include_in_schema=False)
@@ -566,6 +569,35 @@ async def export(doc_key: str, request: Request, token: str = "") -> Response:
     resp = _no_store(StreamingResponse(ndjson(), media_type="application/x-ndjson"))
     resp.headers["Content-Disposition"] = f'attachment; filename="{doc_key}.ndjson"'
     return resp
+
+
+@app.delete("/docs/{doc_key}", response_model=ErasureResult)
+async def delete_doc(doc_key: str, request: Request, response: Response, token: str = "") -> ErasureResult:
+    """GDPR Art. 17 erasure: hard-delete every stored event for one doc.
+
+    Requires STATS_TOKEN to be configured AND supplied, so a public collector
+    never lets strangers wipe other operators' data.
+    """
+    if not _valid_doc(doc_key):
+        return _no_store(JSONResponse({"ok": False, "error": "invalid doc key"}, status_code=400))
+    if not get_settings().stats_token:
+        return _no_store(
+            JSONResponse(
+                {"ok": False, "error": "erasure requires STATS_TOKEN to be configured"},
+                status_code=403,
+            )
+        )
+    if not _stats_authorized(_stats_token(request, token)):
+        return _no_store(JSONResponse({"ok": False, "error": "forbidden"}, status_code=403))
+    try:
+        deleted = await db.purge_doc(doc_key)
+    except SQLAlchemyError:
+        log.exception("erasure failed for %s", doc_key)
+        return _no_store(
+            JSONResponse({"ok": False, "error": "erasure unavailable"}, status_code=500)
+        )
+    _no_store(response)
+    return ErasureResult(ok=True, deleted=deleted)
 
 
 @app.get("/robots.txt", include_in_schema=False)
