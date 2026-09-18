@@ -51,7 +51,7 @@ line-length = 100
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "C4", "PT", "RET", "ASYNC"]
 
 [tool.pyright]
-include = ["collector"]
+include = ["collector", "tests"]
 pythonVersion = "3.13"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false
