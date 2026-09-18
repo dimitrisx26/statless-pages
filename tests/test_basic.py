@@ -483,6 +483,64 @@ async def test_export_jsonl_gated_by_stats_token(client, monkeypatch):
         rows = [json.loads(line) for line in lines]
         assert {row["doc_key"] for row in rows} == {"exp-doc"}
         assert "ip_hash" in rows[0] and "raw_ip" not in rows[0]
+
+        # Header auth must work too (keeps the token out of access logs).
+        r = await client.get("/export/exp-doc", headers={"X-Stats-Token": "shh"})
+        assert r.status_code == 200
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_public_export_omits_identity(client):
+    from collector import database
+
+    await database.log_event(doc_key="pub-doc", ip_hash="a" * 32, ua="Mozilla/5.0")
+    r = await client.get("/export/pub-doc")
+    assert r.status_code == 200
+    rows = [json.loads(line) for line in r.text.strip().splitlines() if line]
+    assert len(rows) == 1
+    assert "ip_hash" not in rows[0]
+    assert "ua" not in rows[0]
+    assert rows[0]["doc_key"] == "pub-doc"
+
+
+async def test_erasure_requires_stats_token(client, monkeypatch):
+    from collector import database
+    from collector.config import get_settings
+
+    await database.log_event(doc_key="wipe-doc", ip_hash="a" * 32)
+
+    # No STATS_TOKEN configured: nobody (not even with a token) may erase.
+    assert (await client.delete("/docs/wipe-doc")).status_code == 403
+    assert (await database.count_events("wipe-doc")) == 1
+
+    monkeypatch.setenv("STATS_TOKEN", "shh")
+    get_settings.cache_clear()
+    try:
+        assert (await client.delete("/docs/wipe-doc")).status_code == 403
+        assert (await client.delete("/docs/wipe-doc?token=wrong")).status_code == 403
+        r = await client.delete("/docs/wipe-doc", headers={"X-Stats-Token": "shh"})
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "deleted": 1}
+        assert (await database.count_events("wipe-doc")) == 0
+        # Erasing again is idempotent.
+        r = await client.delete("/docs/wipe-doc?token=shh")
+        assert r.json() == {"ok": True, "deleted": 0}
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_security_txt_is_configurable(client, monkeypatch):
+    from collector.config import get_settings
+
+    monkeypatch.setenv("SECURITY_CONTACT", "mailto:sec@example.com")
+    monkeypatch.setenv("SECURITY_POLICY", "https://example.com/security")
+    get_settings.cache_clear()
+    try:
+        r = await client.get("/.well-known/security.txt")
+        assert r.status_code == 200
+        assert "Contact: mailto:sec@example.com" in r.text
+        assert "Policy: https://example.com/security" in r.text
     finally:
         get_settings.cache_clear()
 
