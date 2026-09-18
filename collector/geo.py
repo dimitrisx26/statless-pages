@@ -12,9 +12,14 @@ import ipaddress
 import logging
 from functools import lru_cache
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+import maxminddb
 from geoip2.errors import AddressNotFoundError
 from maxminddb import InvalidDatabaseError
+
+if TYPE_CHECKING:
+    from geoip2.database import Reader
 
 log = logging.getLogger(__name__)
 
@@ -24,15 +29,14 @@ UNKNOWN = "XX"
 class GeoLookup:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
-        self._reader = None
+        self._reader: Reader | None = None
         if self.db_path.is_file():
             try:
                 import geoip2.database
-                import maxminddb
 
                 self._reader = geoip2.database.Reader(str(self.db_path), mode=maxminddb.MODE_MEMORY)
                 log.info("GeoIP2 loaded into RAM from %s", self.db_path)
-            except (ImportError, maxminddb.InvalidDatabaseError, OSError) as exc:
+            except (ImportError, InvalidDatabaseError, OSError) as exc:
                 # Corrupt/unreadable DB or missing dependency: tracking must
                 # never break on GeoIP failure, so degrade to no country data.
                 log.warning("GeoIP2 init failed (%s): country resolution disabled", exc)
