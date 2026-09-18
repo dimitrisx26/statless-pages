@@ -27,6 +27,7 @@ USER statless
 VOLUME /app/data
 EXPOSE 8000
 
-# Use the `statless` entrypoint (not bare uvicorn) so STATLESS_HOST/STATLESS_PORT apply.
-# Run inside the uv-managed venv so uvicorn & deps resolve.
-CMD ["uv", "run", "--no-sync", "statless"]
+# Run the installed venv entrypoint directly (not `uv run`): the non-root user
+# has no home directory for uv's cache, and this also skips uv's startup cost.
+# The `statless` script applies STATLESS_HOST/STATLESS_PORT.
+CMD ["/app/.venv/bin/statless"]
