@@ -5,7 +5,8 @@ Endpoints:
     GET  /embed/{doc_key}        Notion /embed widget (~2.8KB) + 15s heartbeats
     POST /heartbeat/{doc_key}    dwell-time beacons {"t": 15|30|60|120}
     GET  /badge/{doc_key}.svg    SVG view counter (for GitHub READMEs)
-    GET  /stats/{doc_key}        JSON aggregates
+    GET  /stats/{doc_key}        JSON aggregates for one doc
+    GET  /overview               Per-doc totals across the whole site
     GET  /healthz                liveness probe
 """
 
@@ -344,6 +345,7 @@ async def index() -> JSONResponse:
                 "embed": f"{s.base_url}/embed/YOUR-DOC",
                 "badge": f"{s.base_url}/badge/YOUR-DOC.svg",
                 "stats": f"{s.base_url}/stats/YOUR-DOC",
+                "overview": f"{s.base_url}/overview",
             },
         }
     )
@@ -503,6 +505,21 @@ async def stats(doc_key: str, token: str = "", since: str = "", to: str = "") ->
         log.exception("stats failed for %s", doc_key)
         return _no_store(JSONResponse({"ok": False, "error": "stats unavailable"}, status_code=500))
     return _no_store(JSONResponse(data))
+
+
+@app.get("/overview")
+async def overview(token: str = "", prefix: str = "") -> JSONResponse:
+    """Per-doc totals for the whole site, busiest first. Optional `prefix` scopes to one site."""
+    if prefix and not _valid_doc(prefix):
+        return _no_store(JSONResponse({"ok": False, "error": "invalid prefix"}, status_code=400))
+    if not _stats_authorized(token):
+        return _no_store(JSONResponse({"ok": False, "error": "forbidden"}, status_code=403))
+    try:
+        docs = await db.get_overview(prefix or None)
+    except SQLAlchemyError:
+        log.exception("overview failed")
+        return _no_store(JSONResponse({"ok": False, "error": "overview unavailable"}, status_code=500))
+    return _no_store(JSONResponse({"docs": docs, "count": len(docs)}))
 
 
 @app.get("/export/{doc_key}", include_in_schema=False)

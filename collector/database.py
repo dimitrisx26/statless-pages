@@ -272,6 +272,42 @@ async def get_export(doc_key: str) -> list[dict]:
     ]
 
 
+def _like_prefix(prefix: str) -> str:
+    """Escape LIKE metacharacters so a doc-key prefix matches literally."""
+    return prefix.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+
+
+async def get_overview(prefix: str | None = None) -> list[dict]:
+    """Per-doc totals across the whole site, busiest first (optional doc-key prefix)."""
+    assert _session_factory is not None, "call init_db() first"
+    views = func.sum(case((Event.kind == "view", 1), else_=0)).label("views")
+    stmt = (
+        select(
+            Event.doc_key,
+            func.count().label("events"),
+            views,
+            func.count(distinct(Event.ip_hash)).label("uniques"),
+            func.max(Event.ts).label("last_ts"),
+        )
+        .group_by(Event.doc_key)
+        .order_by(views.desc(), Event.doc_key)
+    )
+    if prefix:
+        stmt = stmt.where(Event.doc_key.like(_like_prefix(prefix) + "%", escape="\\"))
+    async with _session_factory() as session:
+        rows = (await session.execute(stmt)).all()
+    return [
+        {
+            "doc": doc,
+            "events": int(events or 0),
+            "views": int(v or 0),
+            "uniques": int(uniques or 0),
+            "last_ts": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+        }
+        for doc, events, v, uniques, ts in rows
+    ]
+
+
 async def get_stats(
     doc_key: str,
     since: str | None = None,

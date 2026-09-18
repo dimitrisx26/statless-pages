@@ -16,8 +16,9 @@ All settings are overridable via environment variables:
                    domain - add both when you need both.
     STATLESS_HOST / STATLESS_PORT  Bind address for the `statless` entrypoint
                    (namespaced to avoid colliding with shell/CI HOST & PORT; defaults 0.0.0.0 / 8000)
-    STATS_TOKEN    When set (non-empty), GET /stats requires ?token=<value>.
-                   Empty (default) keeps stats public - the embed badge links to them.
+    STATS_TOKEN    When set (non-empty), GET /stats, /overview, and /export require
+                   ?token=<value>. Empty (default) keeps stats public - the embed badge
+                   links to them.
     RETENTION_DAYS Delete events older than this many days (default: 180).
                    0 disables automatic deletion (data is kept indefinitely -
                    you then own the GDPR storage-limitation duty yourself).
