@@ -36,6 +36,7 @@ Statless Pages is a self-hosted, **cookie-free analytics** collector. It records
 - **No third-party SDK** - pixels need no JavaScript; the embed includes its own heartbeat script
 - **Approximate analytics** - views, rotating-IP-hash uniques, countries, referrers, and embed dwell buckets at 15/30/60/120 seconds
 - **Privacy signals honored** - requests carrying `DNT: 1` or `Sec-GPC: 1` are not recorded
+- **Human-first counts** - crawlers, link-preview/unfurl bots, headless browsers, and prefetch fetches are skipped by default (`FILTER_BOTS=false` to keep them)
 - **Bounded retention** - events older than `RETENTION_DAYS` (default 180) are auto-deleted
 - **Self-hosted storage** - no cookies or fingerprinting; the collector stores salted IP hashes rather than raw IPs
 
@@ -47,6 +48,7 @@ Statless Pages is a self-hosted, **cookie-free analytics** collector. It records
 
 ## Table of contents
 
+- [Notion pages](#notion-pages)
 - [Quick start](#quick-start)
 - [Platform compatibility](#platform-compatibility)
 - [Endpoints](#endpoints)
@@ -57,6 +59,18 @@ Statless Pages is a self-hosted, **cookie-free analytics** collector. It records
 - [Erasure & retention operations](#erasure--retention-operations)
 - [Scaling notes](#scaling-notes)
 - [License](#license)
+
+---
+
+## Notion pages
+
+Statless is built for **Notion pages first**. Drop one embed into any Notion doc to get a live view count plus dwell time:
+
+1. In Notion, type `/embed` and paste `https://YOUR-HOST/embed/my-page`.
+2. The widget renders a live `● N views` badge and beacons dwell at 15s / 30s / 60s / 120s.
+3. Read the numbers at `https://YOUR-HOST/stats/my-page`.
+
+The default `frame-ancestors` allow-list already covers `notion.so` and `notion.site`, so no extra configuration is needed. See [Quick start](#quick-start) for full setup, and [Platform compatibility](#platform-compatibility) for every other surface (custom sites, newsletters, READMEs, Obsidian Publish).
 
 ---
 
@@ -137,6 +151,25 @@ The collector sends cache-prevention headers, but image proxies and email client
 
 The badge is a read-only SVG that displays the current count - it does **not** record views. GitHub proxies README images through `camo.githubusercontent.com`, so referrer and country data will not be meaningful there.
 
+### Obsidian Publish - pixel + badge
+
+Obsidian Publish sanitizes note HTML, so treat it like a README rather than a Notion page - use Markdown images, not the iframe:
+
+```markdown
+![views](https://YOUR-HOST/badge/my-note.svg)
+<img src="https://YOUR-HOST/pixel/my-note.svg" width="1" height="1" alt="" />
+```
+
+The pixel records fetches; the badge is display-only. Publish fronts sites with its own CDN, so referrer and country may be degraded the same way GitHub's Camo proxy degrades them.
+
+The `/embed` iframe is **unverified** here - Obsidian strips most raw HTML, so it may not render. If it does, you must add your Publish origin to `EMBED_ALLOWED_ORIGINS`, and because that list **replaces** the Notion defaults, re-list them:
+
+```bash
+EMBED_ALLOWED_ORIGINS="https://publish.obsidian.md,https://notes.yourdomain.com,https://notion.so,https://*.notion.so,https://notion.site,https://*.notion.site"
+```
+
+Only then would dwell-time heartbeats work on Publish. Test before relying on it.
+
 **4 · Watch it count**
 
 ```bash
@@ -172,6 +205,7 @@ curl http://localhost:8000/stats/q3-roadmap
 | **Coda** | Pixel/badge; embed unverified | No (pixel) | Origin only (`https://coda.io`) | Coda loads content in its own iframes; adding `https://coda.io` to `EMBED_ALLOWED_ORIGINS` removes the server-side block, but whether Coda accepts generic embeds varies - test first. Pixel always works |
 | **Confluence** | Pixel/badge; embed unverified | No (pixel) | Varies | Same: add your Confluence origin to `EMBED_ALLOWED_ORIGINS` and test whether it renders the iframe |
 | **GitHub README** | Badge + pixel | No | No (GitHub proxies images via Camo) | Badge renders live counts; pixel records the fetch. Markdown sanitizes `<iframe>`, so embeds are impossible here |
+| **Obsidian Publish** | Pixel + badge; embed unverified | No (pixel) | Partial (Publish CDN) | Publish sanitizes note HTML; Markdown images render, so pixel + badge work. If the `/embed` iframe renders, add your Publish origin to `EMBED_ALLOWED_ORIGINS` and test |
 | **GitLab, Codeberg, plain HTML sites** | Badge + pixel | No | Varies | Same as GitHub; check whether the platform proxies images |
 
 **Key constraints, in one place:**
@@ -192,6 +226,7 @@ curl http://localhost:8000/stats/q3-roadmap
 | `POST` | `/heartbeat/{doc_key}` | JSON `{"t": 15\|30\|60\|120}` via `navigator.sendBeacon`. Bodies > 4 KB get `413`; `429` past the rate limit |
 | `GET` | `/badge/{doc_key}.svg` | Counter badge for READMEs. Display-only: does not record views; pair with a pixel if you want fetches counted. Customize with `?label=` (up to 40 chars, `[A-Za-z0-9 _.-]`), `?labelColor=RRGGBB`, `?color=RRGGBB` |
 | `GET` | `/stats/{doc_key}` | JSON: views, uniques, daily time-series, dwell buckets, top countries/referrers/devices. **Public by default** - set `STATS_TOKEN` to require `?token=...`. Filter with `?since=YYYY-MM-DD&to=YYYY-MM-DD` (inclusive UTC dates) |
+| `GET` | `/overview` | JSON: per-doc totals for the whole site, busiest first (`doc`, `events`, `views`, `uniques`, `last_ts`). `?prefix=` scopes to a `doc_key` prefix, e.g. all of one Notion space (`site-`). Same `STATS_TOKEN` gate as `/stats` |
 | `GET` | `/export/{doc_key}` | NDJSON dump of all raw event rows for one doc (oldest first; same `STATS_TOKEN` gate). Portable backup / GDPR Art. 15/20 data access |
 | `GET` | `/privacy` | Human-readable privacy notice: exactly what's stored, retention, opt-out, legal position |
 | `GET` | `/robots.txt`, `/.well-known/security.txt` | Crawler off-switch (`Disallow: /`) and a disclosure template. `/security.txt` ships "security@YOUR-DOMAIN.example" - replace it with your real contact |
@@ -216,9 +251,10 @@ For local development, set these variables in the process environment. With Dock
 | `BASE_URL` | `http://localhost:8000` | Rendered into embed/badge snippets |
 | `TRUST_PROXY` | `false` | Honor `X-Forwarded-For` / `X-Real-IP` for IP **hashing/geo** only. Leave off unless behind a proxy that overwrites these headers - otherwise clients can spoof uniques. The rate limiter always uses the real socket IP, unaffected by this flag. |
 | `RATE_LIMIT` | `120` | Tracked events per minute per client (0 disables). Over-limit pixels are silently dropped; heartbeats get `429`. Keyed on the socket IP, so header spoofing can't evade it. |
-| `STATS_TOKEN` | *(empty = public)* | When set, `GET /stats` and `GET /export` require `?token=<value>` (returns `403` otherwise). Use your tokenized URL yourself - the embed badge links the plain URL, which 403s for everyone else. |
+| `STATS_TOKEN` | *(empty = public)* | When set, `GET /stats`, `GET /overview`, and `GET /export` require `?token=<value>` (returns `403` otherwise). Use your tokenized URL yourself - the embed badge links the plain URL, which 403s for everyone else. |
 | `EMBED_ALLOWED_ORIGINS` | Notion apex + wildcard domains | Comma-separated `https` origins allowed to frame `/embed` (replaces the default list, which also covers the `notion.site` apex/wildcards). A leading `*.` wildcard never matches the apex domain - list both when you need both. `EMBED_ALLOWED_ORIGINS=""` sets `frame-ancestors 'none'` (blocks all framing). |
 | `VIEW_DEDUPE_MINUTES` | `0` (off) | Collapse repeated views of the same page by the same IP-hash within the window (double-loads/prefetches count once). Heartbeats and rate limiting are unaffected. |
+| `FILTER_BOTS` | `true` | Skip crawlers, link-preview/unfurl bots, headless browsers, and `Sec-Purpose: prefetch`/preview fetches so counts reflect humans. Generic HTTP clients (curl, python-requests) are not filtered, so manual tests still count. Set `false` to record everything. |
 | `SERVER_SECRET` | *(empty = random)* | Derive salts from `HMAC(secret, date+window)` so uniques survive restarts and match across replicas. Keep the secret in your secret manager, never in the repo. |
 | `STATLESS_HOST` / `STATLESS_PORT` | `0.0.0.0` / `8000` | Bind for the `statless` entrypoint (namespaced so stray `HOST`/`PORT` env vars can't hijack them) |
 | `STATLESS_UID` / `STATLESS_GID` | `10001` | docker-compose only: run the container as your host user so the SQLite bind-mount is writable. On **Linux**: `STATLESS_UID=$(id -u) STATLESS_GID=$(id -g) docker compose up -d` |
