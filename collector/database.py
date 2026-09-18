@@ -19,6 +19,7 @@ SQLite is the default (zero-config single file). Point ``DATABASE_URL`` at
 from __future__ import annotations
 
 import re
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import DateTime, Index, Integer, String, and_, case, delete, distinct, func, select
@@ -237,44 +238,52 @@ async def count_events(doc_key: str) -> int:
         ).scalar() or 0
 
 
-async def get_export(doc_key: str) -> list[dict]:
-    """Raw event rows for one doc, oldest first (JSONL export, Art. 15/20 access)."""
+async def iter_export(
+    doc_key: str, include_identity: bool = True
+) -> AsyncIterator[dict]:
+    """Raw event rows for one doc, oldest first, streamed (JSONL export, Art. 15/20 access).
+
+    Streaming keeps memory flat no matter how many events a doc has.
+    ``include_identity=False`` omits the pseudonymous ``ip_hash`` and the
+    fingerprint-capable ``ua`` column - used when stats are public, so the
+    per-visitor pseudonym trail is only published to token holders.
+    """
     assert _session_factory is not None, "call init_db() first"
+    fields = ["ts", "doc_key", "country", "referrer", "kind", "dwell_seconds"]
+    columns = [Event.ts, Event.doc_key, Event.country, Event.referrer, Event.kind, Event.dwell_seconds]
+    if include_identity:
+        fields[2:2] = ["ip_hash", "ua"]
+        columns[2:2] = [Event.ip_hash, Event.ua]
     async with _session_factory() as session:
-        rows = (
-            await session.execute(
-                select(
-                    Event.ts,
-                    Event.doc_key,
-                    Event.ip_hash,
-                    Event.country,
-                    Event.referrer,
-                    Event.ua,
-                    Event.kind,
-                    Event.dwell_seconds,
-                )
-                .where(Event.doc_key == doc_key)
-                .order_by(Event.ts)
-            )
-        ).all()
-    return [
-        {
-            "ts": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
-            "doc_key": doc,
-            "ip_hash": h,
-            "country": c,
-            "referrer": ref,
-            "ua": ua,
-            "kind": kind,
-            "dwell_seconds": dwell,
-        }
-        for ts, doc, h, c, ref, ua, kind, dwell in rows
-    ]
+        result = await session.stream(
+            select(*columns).where(Event.doc_key == doc_key).order_by(Event.ts)
+        )
+        async for row in result:
+            out: dict = {}
+            for name, value in zip(fields, row, strict=True):
+                if name == "ts":
+                    out["ts"] = value.isoformat() if hasattr(value, "isoformat") else str(value)
+                else:
+                    out[name] = value
+            yield out
 
 
 def _like_prefix(prefix: str) -> str:
     """Escape LIKE metacharacters so a doc-key prefix matches literally."""
     return prefix.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+
+
+def _utc_day_expr():
+    """SQL expression for the UTC calendar day of ``Event.ts``.
+
+    SQLite stores UTC ISO strings, so ``date(ts)`` is already UTC. On Postgres,
+    ``date(timestamptz)`` converts in the session timezone - force UTC with
+    ``AT TIME ZONE 'UTC'`` so daily buckets never drift with the server TZ.
+    """
+    engine = get_engine()
+    if engine.dialect.name == "postgresql":
+        return func.date(func.timezone("UTC", Event.ts))
+    return func.date(Event.ts)
 
 
 async def get_overview(prefix: str | None = None) -> list[dict]:
@@ -361,17 +370,18 @@ async def get_stats(
                 .limit(10)
             )
         ).all()
+        day = _utc_day_expr()
         daily_rows = (
             await session.execute(
                 select(
-                    func.date(Event.ts).label("day"),
+                    day.label("day"),
                     Event.kind,
                     Event.dwell_seconds,
                     func.count().label("n"),
                     func.count(distinct(Event.ip_hash)).label("uniq"),
                 )
                 .where(where)
-                .group_by(func.date(Event.ts), Event.kind, Event.dwell_seconds)
+                .group_by(day, Event.kind, Event.dwell_seconds)
             )
         ).all()
 
