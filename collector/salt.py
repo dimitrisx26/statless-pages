@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import hmac
 import secrets
+from contextlib import suppress
 
 from .config import get_settings
 
@@ -22,12 +23,17 @@ _salt: str | None = None
 _rotation_task: asyncio.Task[None] | None = None
 
 
+def _new_salt() -> str:
+    """Random salt, or the deterministic one when SERVER_SECRET is configured."""
+    secret = get_settings().server_secret
+    return derive_ephemeral_salt(secret) if secret else secrets.token_hex(32)
+
+
 def current_salt() -> str:
     """Return the active salt, deriving/generating one lazily on first use."""
     global _salt
     if _salt is None:
-        secret = get_settings().server_secret
-        _salt = derive_ephemeral_salt(secret) if secret else secrets.token_hex(32)
+        _salt = _new_salt()
     return _salt
 
 
@@ -47,17 +53,16 @@ def derive_ephemeral_salt(server_secret: str) -> str:
     return hmac.new(server_secret.encode(), message, hashlib.sha256).hexdigest()
 
 
-def _next_salt() -> None:
+def _next_salt() -> str:
     """Advance to the salt for a fresh window (random unless SERVER_SECRET)."""
     global _salt
-    secret = get_settings().server_secret
-    _salt = derive_ephemeral_salt(secret) if secret else secrets.token_hex(32)
+    _salt = _new_salt()
+    return _salt
 
 
 def rotate_salt() -> str:
     """Force-rotate the salt immediately. Returns the new salt."""
-    _next_salt()
-    return _salt
+    return _next_salt()
 
 
 def hash_ip(ip: str, salt: str | None = None) -> str:
@@ -92,7 +97,5 @@ async def stop_rotation_loop() -> None:
     task, _rotation_task = _rotation_task, None
     if task is not None and not task.done():
         task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
