@@ -1,0 +1,77 @@
+name: Feature request
+description: Suggest an integration, metric, setting, or platform.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Statless is intentionally small and privacy-first. Requests that need cookies,
+        client-side storage, fingerprinting, or third-party scripts are very unlikely
+        to be accepted - but integrations and useful server-side metrics are welcome.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of change is this?
+      options:
+        - New platform / integration
+        - New metric or stat
+        - Configuration option
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the use case before the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like to see?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing settings, other tools, or workarounds you tried.
+    validations:
+      required: false
+  - type: input
+    id: platform
+    attributes:
+      label: Target platform (for integrations)
+      placeholder: Coda / Confluence / Obsidian Publish / ...
+    validations:
+      required: false
+  - type: input
+    id: reference
+    attributes:
+      label: Reference or example (optional)
+      description: Link to the platform's embed docs, or a screenshot.
+    validations:
+      required: false
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Would you be willing to contribute this?
+      options:
+        - "Yes, I can open a PR"
+        - "Maybe, with guidance"
+        - "No, just suggesting"
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and Discussions.
+          required: true
+        - label: This keeps the cookie-free, no-client-storage design.
+          required: true
