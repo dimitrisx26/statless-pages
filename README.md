@@ -49,6 +49,7 @@ Statless Pages is a self-hosted, **cookie-free analytics** collector. It records
 ## Table of contents
 
 - [Notion pages](#notion-pages)
+- [How it compares](#how-it-compares)
 - [Quick start](#quick-start)
 - [Platform compatibility](#platform-compatibility)
 - [Endpoints](#endpoints)
@@ -71,6 +72,24 @@ Statless is built for **Notion pages first**. Drop one embed into any Notion doc
 3. Read the numbers at `https://YOUR-HOST/stats/my-page`.
 
 The default `frame-ancestors` allow-list already covers `notion.so` and `notion.site`, so no extra configuration is needed. See [Quick start](#quick-start) for full setup, and [Platform compatibility](#platform-compatibility) for every other surface (custom sites, newsletters, READMEs, Obsidian Publish).
+
+---
+
+## How it compares
+
+Statless is deliberately small. It counts page views and embed dwell on surfaces that other trackers ignore - Notion pages, newsletters, and READMEs - without asking visitors to run a third-party script.
+
+| | statless-pages | Plausible CE | Umami | GoatCounter |
+|---|---|---|---|---|
+| Collection | SVG pixel or iframe embed - **no JS for pixels** | JS snippet | JS snippet | JS snippet or no-JS image pixel |
+| Notion embed with dwell time | **Built in** | No | No | No |
+| README / Markdown counter | **Built-in SVG badge** | JS traffic badge | No | No |
+| Self-host footprint | **One container + SQLite** (Postgres optional) | Postgres + ClickHouse | Node + Postgres/MySQL | One Go binary + SQLite/Postgres |
+| License | AGPLv3 | AGPLv3 | MIT | EUPL-1.2 (modified) |
+
+> Competitor capabilities change; verify against each project's docs. Last reviewed 2026-09.
+
+**Not a fit if** you need funnels, session replay, custom events, or a full dashboard - use [Plausible](https://plausible.io), [Umami](https://umami.is), or [GoatCounter](https://www.goatcounter.com) for that. Statless trades those for a tiny footprint and an embed-first design.
 
 ---
 
