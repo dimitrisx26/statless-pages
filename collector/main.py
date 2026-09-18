@@ -35,6 +35,7 @@ from . import __version__, salt
 from . import database as db
 from .config import get_settings
 from .geo import get_geo
+from .models import DocStats, OverviewResponse
 
 log = logging.getLogger(__name__)
 
@@ -480,31 +481,51 @@ def _parse_date(value: str) -> str | None:
         return None
 
 
+def _validated_dates(since: str, to: str) -> tuple[str, str] | JSONResponse:
+    """Shared since/to validation. Returns (since, to) or a 400 JSONResponse."""
+    parsed_since, parsed_to = _parse_date(since) or "", _parse_date(to) or ""
+    if since and not parsed_since:
+        return JSONResponse({"ok": False, "error": "bad since date"}, status_code=400)
+    if to and not parsed_to:
+        return JSONResponse({"ok": False, "error": "bad to date"}, status_code=400)
+    if parsed_since and parsed_to and parsed_since > parsed_to:
+        return JSONResponse({"ok": False, "error": "since after to"}, status_code=400)
+    return parsed_since, parsed_to
+
+
 def _stats_authorized(token: str) -> bool:
     """True unless STATS_TOKEN is set and the token does not match (public by default)."""
     expected = get_settings().stats_token
     return not expected or hmac.compare_digest(token, expected)
 
 
-@app.get("/stats/{doc_key}")
-async def stats(doc_key: str, token: str = "", since: str = "", to: str = "") -> JSONResponse:
+def _stats_token(request: Request, query_token: str) -> str:
+    """Token for stats endpoints. Prefers the header (keeps secrets out of access logs).
+
+    The `?token=` query parameter is kept for backwards compatibility.
+    """
+    return request.headers.get("x-stats-token", "").strip() or query_token
+
+
+@app.get("/stats/{doc_key}", response_model=DocStats)
+async def stats(
+    doc_key: str, request: Request, response: Response, token: str = "", since: str = "", to: str = ""
+) -> DocStats:
     if not _valid_doc(doc_key):
         return _no_store(JSONResponse({"ok": False, "error": "invalid doc key"}, status_code=400))
-    if since and not _parse_date(since):
-        return _no_store(JSONResponse({"ok": False, "error": "bad since date"}, status_code=400))
-    if to and not _parse_date(to):
-        return _no_store(JSONResponse({"ok": False, "error": "bad to date"}, status_code=400))
-    parsed_since, parsed_to = _parse_date(since) or "", _parse_date(to) or ""
-    if parsed_since and parsed_to and parsed_since > parsed_to:
-        return _no_store(JSONResponse({"ok": False, "error": "since after to"}, status_code=400))
-    if not _stats_authorized(token):
+    if not _stats_authorized(_stats_token(request, token)):
         return _no_store(JSONResponse({"ok": False, "error": "forbidden"}, status_code=403))
+    dates = _validated_dates(since, to)
+    if isinstance(dates, JSONResponse):
+        return _no_store(dates)
+    parsed_since, parsed_to = dates
     try:
         data = await db.get_stats(doc_key, since=parsed_since or None, to=parsed_to or None)
     except SQLAlchemyError:
         log.exception("stats failed for %s", doc_key)
         return _no_store(JSONResponse({"ok": False, "error": "stats unavailable"}, status_code=500))
-    return _no_store(JSONResponse(data))
+    _no_store(response)
+    return DocStats(**data)
 
 
 @app.get("/overview")
