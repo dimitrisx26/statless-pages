@@ -267,7 +267,7 @@ async def test_422_carries_no_store(client: AsyncClient) -> None:
     assert r.headers["Cache-Control"].startswith("no-store")
 
 
-@pytest.mark.parametrize("header", ["DNT", "Sec-GPC"])
+@pytest.mark.parametrize("header", ["DNT", "Sec-GPC", "X-Opt-Out"])
 async def test_privacy_signal_skips_ingestion(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch, header: str
 ) -> None:
@@ -501,6 +501,7 @@ async def test_robots_and_security_txt(client: AsyncClient) -> None:
     s = await client.get("/.well-known/security.txt")
     assert s.status_code == 200
     assert "Contact:" in s.text
+    assert "Expires:" in s.text
 
 
 async def test_export_jsonl_gated_by_stats_token(
@@ -509,7 +510,7 @@ async def test_export_jsonl_gated_by_stats_token(
     from collector import database
     from collector.config import get_settings
 
-    await database.log_event(doc_key="exp-doc", ip_hash="a" * 32)
+    await database.log_event(doc_key="exp-doc", ip_hash="a" * 32, ua=DESKTOP_UA)
     await database.log_event(
         doc_key="exp-doc", ip_hash="b" * 32, kind="heartbeat", dwell_seconds=15
     )
@@ -527,6 +528,8 @@ async def test_export_jsonl_gated_by_stats_token(
         rows = [json.loads(line) for line in lines]
         assert {row["doc_key"] for row in rows} == {"exp-doc"}
         assert "ip_hash" in rows[0]
+        assert "device" in rows[0]
+        assert "ua" not in rows[0]
         assert "raw_ip" not in rows[0]
 
         # Header auth must work too (keeps the token out of access logs).
@@ -546,7 +549,104 @@ async def test_public_export_omits_identity(client: AsyncClient) -> None:
     assert len(rows) == 1
     assert "ip_hash" not in rows[0]
     assert "ua" not in rows[0]
+    assert "device" not in rows[0]
     assert rows[0]["doc_key"] == "pub-doc"
+
+
+async def test_opt_out_cookie_and_param_skip_ingestion(client: AsyncClient) -> None:
+    from collector import database
+
+    # Cookie opt-out
+    r = await client.get("/pixel/opt-cookie.svg", headers={"cookie": "statless_opt_out=1"})
+    assert r.status_code == 200
+    assert (await database.get_stats("opt-cookie"))["events"] == 0
+
+    # Query param opt-out
+    r = await client.get("/pixel/opt-param.svg?optout=1")
+    assert r.status_code == 200
+    assert (await database.get_stats("opt-param"))["events"] == 0
+
+
+async def test_opt_out_page_and_toggle(client: AsyncClient) -> None:
+    # Initial status: active
+    r = await client.get("/opt-out")
+    assert r.status_code == 200
+    assert "Tracking Active" in r.text
+
+    # Submit opt-out
+    post_resp = await client.post(
+        "/opt-out",
+        content=b"action=opt_out",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert post_resp.status_code == 303
+    assert "statless_opt_out" in post_resp.headers.get("set-cookie", "")
+
+    # Status with cookie: opted out
+    r2 = await client.get("/opt-out", headers={"cookie": "statless_opt_out=1"})
+    assert r2.status_code == 200
+    assert "Status: Opted Out" in r2.text
+
+    # Opt back in
+    post_in = await client.post(
+        "/opt-out",
+        content=b"action=opt_in",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert post_in.status_code == 303
+
+
+async def test_opt_out_cookie_https_cross_site(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    from collector.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "base_url", "https://analytics.example.com")
+
+    post_resp = await client.post(
+        "/opt-out",
+        content=b"action=opt_out",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    cookie_header = post_resp.headers.get("set-cookie", "")
+    assert "statless_opt_out=1" in cookie_header
+    assert "SameSite=none" in cookie_header
+    assert "Secure" in cookie_header
+    if sys.version_info >= (3, 14):
+        assert "Partitioned" in cookie_header
+
+    post_in = await client.post(
+        "/opt-out",
+        content=b"action=opt_in",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert post_in.status_code == 303
+    clear_cookie = post_in.headers.get("set-cookie", "")
+    assert "statless_opt_out=" in clear_cookie
+    assert "Max-Age=0" in clear_cookie
+
+
+async def test_root_index_discovery(client: AsyncClient) -> None:
+    r = await client.get("/")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["service"] == "statless-pages"
+    assert "privacy" in data["usage"]
+    assert "opt_out" in data["usage"]
+    assert data["usage"]["privacy"].endswith("/privacy")
+    assert data["usage"]["opt_out"].endswith("/opt-out")
+
+
+async def test_privacy_page_statutory_notices(client: AsyncClient) -> None:
+    r = await client.get("/privacy")
+    assert r.status_code == 200
+    assert "Legitimate Interests" in r.text
+    assert "Article 11(2)" in r.text
+    assert "supervisory authority" in r.text
+    assert "/opt-out" in r.text
 
 
 async def test_erasure_requires_stats_token(
