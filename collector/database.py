@@ -439,10 +439,6 @@ async def get_stats(
                 .order_by(func.count().desc(), Event.device)
             )
         ).all()
-        device_list = sorted(
-            [{"device": dev or "other", "count": n} for dev, n in devices],
-            key=lambda item: (-item["count"], item["device"]),
-        )
 
     return {
         "doc": doc_key,
@@ -453,5 +449,5 @@ async def get_stats(
         "daily": daily,
         "countries": [{"country": c, "count": n} for c, n in countries],
         "referrers": [{"referrer": r, "count": n} for r, n in referrers],
-        "devices": device_list,
+        "devices": [{"device": dev or "other", "count": int(n)} for dev, n in devices],
     }
