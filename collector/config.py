@@ -25,6 +25,10 @@ All settings are overridable via environment variables:
     SECURITY_CONTACT  Contact line for /.well-known/security.txt. Replace the mailto
                    placeholder before going public (default: mailto:security@YOUR-DOMAIN.example)
     SECURITY_POLICY  Optional Policy URL for /.well-known/security.txt (e.g. your VDP or ToS)
+    SECURITY_EXPIRES Optional RFC 3339 timestamp for security.txt Expires field
+                   (default: 1 year ahead)
+    CONTROLLER_NAME  Optional controller name for the /privacy notice
+    CONTROLLER_CONTACT Optional controller contact link or email for the /privacy notice
     RETENTION_DAYS Delete events older than this many days (default: 180).
                    0 disables automatic deletion (data is kept indefinitely -
                    you then own the GDPR storage-limitation duty yourself).
@@ -73,6 +77,9 @@ class Settings(BaseSettings):
     base_url: str = "http://localhost:8000"
     security_contact: str = "mailto:security@YOUR-DOMAIN.example"
     security_policy: str = ""
+    security_expires: str = ""
+    controller_name: str = ""
+    controller_contact: str = ""
     trust_proxy: bool = False
     rate_limit: int = Field(default=120, ge=0)
     stats_token: str = ""
