@@ -1,11 +1,11 @@
 blank_issues_enabled: false
 contact_links:
   - name: Ask a question / share your setup
-    url: https://github.com/dimitrisx26/statless-pages/discussions
+    url: https://github.com/statless/statless-pages/discussions
     about: Setup help, platform questions, and show-and-tell live in Discussions.
   - name: Read the docs first
-    url: https://github.com/dimitrisx26/statless-pages#quick-start
+    url: https://github.com/statless/statless-pages#quick-start
     about: Quick start, platform compatibility, endpoints, and configuration tables.
   - name: Report a security vulnerability
-    url: https://github.com/dimitrisx26/statless-pages/security/advisories/new
+    url: https://github.com/statless/statless-pages/security/advisories/new
     about: Please report vulnerabilities privately, not as a public issue.

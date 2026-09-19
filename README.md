@@ -5,8 +5,8 @@
 **Self-hosted page-view counts - without cookies, fingerprinting, or a third-party JS SDK.**
 
 <p>
-  <a href="https://github.com/dimitrisx26/statless-pages/actions/workflows/ci.yml">
-    <img src="https://img.shields.io/github/actions/workflow/status/dimitrisx26/statless-pages/ci.yml?branch=main&amp;style=flat-square&amp;logo=github&amp;label=CI" alt="CI status on main" />
+  <a href="https://github.com/statless/statless-pages/actions/workflows/ci.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/statless/statless-pages/ci.yml?branch=main&amp;style=flat-square&amp;logo=github&amp;label=CI" alt="CI status on main" />
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-AGPLv3-2563EB?style=flat-square" alt="License: AGPLv3" />
@@ -22,7 +22,7 @@
   </a>
 </p>
 
-[Report a bug](https://github.com/dimitrisx26/statless-pages/issues) · [Request a feature](https://github.com/dimitrisx26/statless-pages/issues) · [Privacy notice](#privacy--compliance)
+[Report a bug](https://github.com/statless/statless-pages/issues) · [Request a feature](https://github.com/statless/statless-pages/issues) · [Privacy notice](#privacy--compliance)
 
 </div>
 
@@ -105,7 +105,7 @@ Statless is deliberately small. It counts page views and embed dwell on surfaces
 **1 · Clone the repository**
 
 ```bash
-git clone https://github.com/dimitrisx26/statless-pages.git
+git clone https://github.com/statless/statless-pages.git
 cd statless-pages
 ```
 
