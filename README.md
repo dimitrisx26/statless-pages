@@ -240,16 +240,18 @@ curl http://localhost:8000/stats/q3-roadmap
 
 | Method | Route | Notes |
 |---|---|---|
+| `GET` | `/` | JSON service index listing usage endpoints, `/privacy`, and `/opt-out` |
 | `GET` | `/pixel/{doc_key}.svg` | 1×1 transparent SVG. `Cache-Control: no-store …`, `Pragma: no-cache`, `Expires: 0`, `X-Robots-Tag: noindex, nofollow` |
 | `GET` | `/embed/{doc_key}` | ~2.8KB HTML embed widget (badge + dwell heartbeats). Optional `?theme=light\|dark` forces a palette (default: follows the OS). `CSP: frame-ancestors` allow-list (Notion domains by default; configurable via `EMBED_ALLOWED_ORIGINS`) |
 | `POST` | `/heartbeat/{doc_key}` | JSON `{"t": 15\|30\|60\|120}` via `navigator.sendBeacon`. Bodies > 4 KB get `413`; `429` past the rate limit |
 | `GET` | `/badge/{doc_key}.svg` | Counter badge for READMEs. Display-only: does not record views; pair with a pixel if you want fetches counted. Customize with `?label=` (up to 40 characters: letters, digits, spaces, `. _ -`), `?labelColor=RRGGBB`, `?color=RRGGBB` |
-| `GET` | `/stats/{doc_key}` | JSON: views, uniques, daily time-series, dwell buckets, top countries/referrers/devices. **Public by default** - set `STATS_TOKEN` to require `?token=...` or the `X-Stats-Token` header (header preferred - query strings end up in access logs). Filter with `?since=YYYY-MM-DD&to=YYYY-MM-DD` (inclusive UTC dates) |
-| `GET` | `/overview` | JSON: per-doc totals for the whole site, busiest first (`doc`, `events`, `views`, `uniques`, `last_ts`). `?prefix=` scopes to a `doc_key` prefix, e.g. all of one Notion space (`site-`). Same `STATS_TOKEN` gate as `/stats` |
-| `GET` | `/export/{doc_key}` | NDJSON dump of raw event rows for one doc (oldest first, streamed; same `STATS_TOKEN` gate). Portable backup / GDPR Art. 15/20 data access. When stats are public (no `STATS_TOKEN`), the visitor pseudonym (`ip_hash`) and the fingerprint-capable `ua` column are omitted - pseudonymous data is still personal data under GDPR, so the per-visitor trail is only published to token holders |
-| `DELETE` | `/docs/{doc_key}` | GDPR Art. 17 erasure: hard-delete every stored event for one doc. Requires `STATS_TOKEN` to be configured AND supplied; with no token configured the endpoint always refuses (`403`) |
-| `GET` | `/privacy` | Human-readable privacy notice: exactly what's stored, retention, opt-out, legal position |
-| `GET` | `/robots.txt`, `/.well-known/security.txt` | Crawler off-switch (`Disallow: /`) and a disclosure template. Configure `SECURITY_CONTACT` (and optionally `SECURITY_POLICY`) - the default contact is a placeholder |
+| `GET` | `/stats/{doc_key}` | JSON: views, uniques, daily time-series, dwell buckets, top countries/referrers/devices. **Set `STATS_TOKEN` in production** to satisfy GDPR Art. 25(2) (Data Protection by Default) and require `?token=...` or the `X-Stats-Token` header. Filter with `?since=YYYY-MM-DD&to=YYYY-MM-DD` (inclusive UTC dates) |
+| `GET` | `/overview` | JSON: per-doc totals for the whole site, busiest first (`doc`, `events`, `views`, `uniques`, `last_ts`). `?prefix=` scopes to a `doc_key` prefix. Same `STATS_TOKEN` gate as `/stats` |
+| `GET` | `/export/{doc_key}` | NDJSON dump of raw event rows for one doc (oldest first, streamed; same `STATS_TOKEN` gate). Operator document backup and audit export. When stats are public (no `STATS_TOKEN`), pseudonymous identity fields (`ip_hash`, `device`) are omitted. Note: not an individual GDPR Art. 15/20 data subject export (exporting all events for a doc would disclose other visitors' records, violating Art. 15(4) / Art. 33) |
+| `DELETE` | `/docs/{doc_key}` | Document lifecycle purge: hard-delete every stored event for one doc. Requires `STATS_TOKEN` to be configured AND supplied; with no token configured the endpoint refuses (`403`). Individual erasure is governed by GDPR Art. 11(2) as individual visits are non-identifiable |
+| `GET` | `/privacy` | Privacy notice with GDPR Art. 13 disclosures: legal basis (Art. 6(1)(f)), stored fields, retention, complaint rights, and opt-out routes |
+| `GET` | `/opt-out` | Direct visitor opt-out page & toggle (satisfies French CNIL exemption and GDPR Art. 21 objection) |
+| `GET` | `/robots.txt`, `/.well-known/security.txt` | Crawler off-switch (`Disallow: /`) and an RFC 9116 compliant security disclosure template with required `Expires:` line |
 | `GET` | `/healthz` | Liveness probe |
 
 `doc_key` may contain letters, digits, `-` and `_` only, and must be 1-64 characters long.
@@ -258,9 +260,9 @@ curl http://localhost:8000/stats/q3-roadmap
 
 ## Configuration
 
-For local development, set these variables in the process environment. With Docker Compose, add collector settings to the service's `environment` block in [`docker-compose.yml`](docker-compose.yml), then recreate the container. The supplied Compose file interpolates `BASE_URL` and `SALT_ROTATE_HOURS`; other collector settings are not automatically forwarded from your shell or a Compose `.env` file.
+For Docker Compose or local development, copy `.env.example` to `.env` and set your variables. The supplied [`docker-compose.yml`](docker-compose.yml) automatically forwards all configuration variables from `.env` to the container.
 
-> **Before going public:** use HTTPS, persist and back up `./data`, decide whether statistics should be public, and review proxy trust and retention settings. `STATS_TOKEN` protects the JSON statistics endpoint, not the counts displayed by badges or embeds. Avoid putting secrets in page keys or sharing token-bearing URLs.
+> **Before going public:** use HTTPS, persist and back up `./data`, set `STATS_TOKEN` (required for GDPR Art. 25(2) Data Protection by Default), and review proxy trust and retention settings. Avoid putting secrets in page keys or sharing token-bearing URLs.
 
 | Var | Default | Purpose |
 |---|---|---|
@@ -270,16 +272,19 @@ For local development, set these variables in the process environment. With Dock
 | `RETENTION_DAYS` | `180` | Auto-delete events older than this. `0` disables automatic deletion (you then own the storage-limitation duty) |
 | `BASE_URL` | `http://localhost:8000` | Rendered into embed/badge snippets |
 | `SECURITY_CONTACT` | `mailto:security@YOUR-DOMAIN.example` | Contact line for `/.well-known/security.txt` - **replace before going public** |
-| `SECURITY_POLICY` | *(empty = omitted)* | Optional `Policy:` URL for `/.well-known/security.txt` (e.g. your vulnerability disclosure policy or ToS). DPA/ToS links are operator-owned; add them here |
-| `TRUST_PROXY` | `false` | Honor `X-Forwarded-For` / `X-Real-IP` for IP **hashing/geo** only. Leave off unless behind a proxy that overwrites these headers - otherwise clients can spoof uniques. The rate limiter always uses the real socket IP, unaffected by this flag. |
-| `RATE_LIMIT` | `120` | Tracked events per minute per client (0 disables). Over-limit pixels are silently dropped; heartbeats get `429`. Keyed on the socket IP, so header spoofing can't evade it. |
-| `STATS_TOKEN` | *(empty = public)* | When set, `GET /stats`, `GET /overview`, and `GET /export` require `?token=<value>` or the `X-Stats-Token` header (header preferred - query strings end up in access logs). Also gates `DELETE /docs/{doc_key}` (Art. 17). Use your tokenized URL yourself - the embed badge links the plain URL, which 403s for everyone else. |
-| `EMBED_ALLOWED_ORIGINS` | Notion apex + wildcard domains | Comma-separated `https` origins allowed to frame `/embed` (replaces the default list, which also covers the `notion.site` apex/wildcards). A leading `*.` wildcard never matches the apex domain - list both when you need both. `EMBED_ALLOWED_ORIGINS=""` sets `frame-ancestors 'none'` (blocks all framing). |
-| `VIEW_DEDUPE_MINUTES` | `0` (off) | Collapse repeated views of the same page by the same IP-hash within the window (double-loads/prefetches count once). Heartbeats and rate limiting are unaffected. |
-| `FILTER_BOTS` | `true` | Skip crawlers, link-preview/unfurl bots, headless browsers, and `Sec-Purpose: prefetch`/preview fetches so counts reflect humans. Generic HTTP clients (curl, python-requests) are not filtered, so manual tests still count. Set `false` to record everything. |
-| `SERVER_SECRET` | *(empty = random)* | Derive salts from `HMAC(secret, date+window)` so uniques survive restarts and match across replicas. Keep the secret in your secret manager, never in the repo. |
-| `STATLESS_HOST` / `STATLESS_PORT` | `0.0.0.0` / `8000` | Bind for the `statless` entrypoint (namespaced so stray `HOST`/`PORT` env vars can't hijack them) |
-| `STATLESS_UID` / `STATLESS_GID` | `10001` | docker-compose only: run the container as your host user so the SQLite bind-mount is writable. On **Linux**: `STATLESS_UID=$(id -u) STATLESS_GID=$(id -g) docker compose up -d` |
+| `SECURITY_POLICY` | *(empty = omitted)* | Optional `Policy:` URL for `/.well-known/security.txt` |
+| `SECURITY_EXPIRES` | *(empty = 1 year ahead)* | Optional RFC 3339 timestamp for RFC 9116 `Expires:` in `security.txt` |
+| `CONTROLLER_NAME` | *(empty = default)* | Controller organization/name for `/privacy` notice |
+| `CONTROLLER_CONTACT` | *(empty = default)* | Controller privacy contact for `/privacy` notice |
+| `TRUST_PROXY` | `false` | Honor `X-Forwarded-For` / `X-Real-IP` for IP **hashing/geo** only. Leave off unless behind a proxy that overwrites these headers. |
+| `RATE_LIMIT` | `120` | Tracked events per minute per client (0 disables). Over-limit pixels are silently dropped; heartbeats get `429`. |
+| `STATS_TOKEN` | *(empty = public)* | When set, `GET /stats`, `GET /overview`, and `GET /export` require token auth. **Set in production for GDPR Art. 25(2) Data Protection by Default.** |
+| `EMBED_ALLOWED_ORIGINS` | Notion apex + wildcard domains | Comma-separated `https` origins allowed to frame `/embed`. |
+| `VIEW_DEDUPE_MINUTES` | `0` (off) | Collapse repeated views of the same page by the same IP-hash within the window. |
+| `FILTER_BOTS` | `true` | Skip crawlers, link-preview bots, and prefetch fetches so counts reflect humans. |
+| `SERVER_SECRET` | *(empty = random)* | Derive salts deterministically (`HMAC(secret, date+window)`) for multi-replica consistency. See scaling notes for DPIA trade-offs. |
+| `STATLESS_HOST` / `STATLESS_PORT` | `0.0.0.0` / `8000` | Bind for the `statless` entrypoint |
+| `STATLESS_UID` / `STATLESS_GID` | `10001` | docker-compose only: run container as host user |
 
 ---
 
@@ -312,37 +317,36 @@ uv run uvicorn collector.main:app --reload
 
 ## Privacy & compliance
 
-**The short version:** no cookies, no device identifiers, no fingerprinting, no persistent IDs - and requests carrying `DNT: 1` / `Sec-GPC: 1` are dropped before anything is recorded. IP hashes rotate every 24h and raw IPs are never stored; retention is bounded by default (180 days). The full notice is served at `/privacy`.
+**The short version:** no tracking cookies, no device identifiers, no hardware fingerprinting, no raw IPs or raw User-Agents stored, and requests carrying `DNT: 1`, `Sec-GPC: 1`, or opt-out cookies are dropped before recording. IP hashes rotate every 24h; retention is bounded by default (180 days). The full statutory notice is served at `/privacy`, and a direct opt-out page lives at `/opt-out`.
 
-**Do you need a cookie banner?** Usually no - the collector is fully server-side: nothing is stored on or read from the visitor's device (no cookies, ETags, or localStorage), and ePrivacy Art. 5(3)/PECR/TDDDG §25 consent rules attach to *device access*, not to server-side measurement. Processing still needs a lawful basis under GDPR (commonly legitimate interests, Art. 6(1)(f)), which is an operator decision and duty, not a software property. See [doc/COMPLIANCE.md](doc/COMPLIANCE.md) for the full audit - including the DE/FR caveats and the exact changes that would re-open the banner question.
+**Do you need a consent banner?** It depends on your integration and jurisdiction:
+- **SVG Pixels:** Pure server-side HTTP GET; does not access terminal storage or run scripts. Under traditional ePrivacy Art. 5(3) interpretations, no banner is needed. (Note: EDPB Guidelines 2/2023 take an expansive view on tracking pixels).
+- **Embed Widgets (`/embed`):** Executes client-side JavaScript for dwell-time telemetry (`sendBeacon` and visibility listeners). Under **Germany's TDDDG § 25**, this engages device access rules; using the no-JS pixel is the lower-risk route there without a consent banner.
+- **France (CNIL):** CNIL's analytics exemption criteria are supported via the direct visitor opt-out page at `/opt-out`.
+- **GDPR Lawful Basis:** Processing pseudonymous IP hashes relies on Legitimate Interests (Art. 6(1)(f)). Operators must conduct a Legitimate Interest Assessment (LIA) and name a controller in `/privacy`.
+- **Data Protection by Default (Art. 25(2)):** Configure `STATS_TOKEN` so that page keys and visitor statistics are not publicly indexable.
+- **US Privacy Laws:** GPC (`Sec-GPC: 1`) is honored out-of-the-box, supporting state universal opt-out signals (CCPA/CPRA). No personal information is sold or shared.
 
-- **GDPR/ePrivacy (EU):** pseudonymised IP hashes are still personal data (EDPB Guidelines 01/2025), so document a legitimate-interest assessment / DPIA, publish the `/privacy` page, and name a contact.
-- **UK GDPR / PECR:** mirrors the EU analysis; the "terminal equipment" test reads the same way. Operator decision.
-- **US:** no banner typically required for cookie-free, non-identifying analytics; GPC is honored, which supports state-law universal opt-out positions (CCPA/CPRA, VCDPA, CPA...). Operator decision.
-
-Compliance depends on how *you* deploy and document it - this software provides the technical measures, not a legal guarantee. A per-jurisdiction audit with an operator checklist lives in [doc/COMPLIANCE.md](doc/COMPLIANCE.md).
+See [doc/COMPLIANCE.md](doc/COMPLIANCE.md) for the detailed legal audit and DPIA checklist.
 
 ---
 
 ## Erasure & retention operations
 
-- **Automatic:** events older than `RETENTION_DAYS` (default 180) are deleted daily.
-- **Per-doc erasure:** call `await db.purge_doc("doc-key")` to hard-delete every event for one doc (GDPR Art. 17 helper).
-- **Full data access:** `GET /export/{doc_key}` returns one streamed NDJSON row per stored event (same `STATS_TOKEN` gate; omits `ip_hash`/`ua` when stats are public) - use it for GDPR Art. 15/20 requests and backups.
-- **Individual erasure limits:** with a rotating salt and no identifiers, the collector generally cannot link stored events back to a person - say so plainly in your privacy notice.
+- **Automatic pruning:** events older than `RETENTION_DAYS` (default 180) are deleted daily.
+- **Document lifecycle purge:** `DELETE /docs/{doc_key}` (or `await db.purge_doc("key")`) hard-deletes every stored event for one doc key (operator decommissioning). Requires `STATS_TOKEN`.
+- **Operator audit export:** `GET /export/{doc_key}` streams an NDJSON dump of event rows for backup and audit. (Not for individual Art. 15/20 data subject requests, as disclosing all events for a page would violate third-party privacy).
+- **Individual erasure & access limits:** Because data is pseudonymous under rotating ephemeral salts and no identifiers or raw IPs are stored, individual visitors cannot be identified from stored rows. Individual access and erasure requests are governed by **GDPR Article 11(2)**.
 
 ---
 
 ## Scaling notes
 
-**Run a single worker.** The shipped `statless` entrypoint uses one process, and that's deliberate:
+**Run a single worker** with SQLite by default. The rate limiter is in-memory and SQLite is single-writer.
 
-- The rate limiter lives in process memory, so multiple workers would multiply rate limits independently (N workers ≈ N× rate limit).
-- SQLite is single-writer - extra workers only contend on the write lock.
+**If you outgrow it:** move to PostgreSQL, run N replicas, and delegate rate limiting to your proxy. For unique counts across replicas, configure `SERVER_SECRET` so salts derive from `HMAC(secret, date + window)`.
 
-One event loop easily serves thousands of pixel/heartbeat requests per second; the DB is the bottleneck, not Python.
-
-**If you outgrow it:** move to PostgreSQL, run N replicas, and delegate rate limiting to your proxy (e.g. nginx `limit_req`). For uniques, set `SERVER_SECRET` - salts then derive deterministically from `HMAC(secret, date + window)` (`SALT_ROTATE_HOURS` controls the window), surviving restarts and matching across replicas sharing the secret. Keep the secret in your secret manager, never in the repo.
+> **DPIA Note on `SERVER_SECRET`:** While ephemeral RAM salts provide forward-secrecy (past hashes become un-correlatable upon rotation), `SERVER_SECRET` derives salts deterministically. Anyone with access to the database and `SERVER_SECRET` could reverse 32-bit IPv4 hashes via brute force. Protect `SERVER_SECRET` accordingly.
 
 ---
 
