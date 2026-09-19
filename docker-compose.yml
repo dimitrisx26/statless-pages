@@ -16,6 +16,18 @@ services:
       DATABASE_URL: sqlite+aiosqlite:///./data/statless.db
       BASE_URL: ${BASE_URL:-http://localhost:8000}
       SALT_ROTATE_HOURS: ${SALT_ROTATE_HOURS:-24}
+      STATS_TOKEN: ${STATS_TOKEN:-}
+      CONTROLLER_NAME: ${CONTROLLER_NAME:-}
+      CONTROLLER_CONTACT: ${CONTROLLER_CONTACT:-}
+      SECURITY_CONTACT: ${SECURITY_CONTACT:-mailto:security@YOUR-DOMAIN.example}
+      SECURITY_POLICY: ${SECURITY_POLICY:-}
+      SECURITY_EXPIRES: ${SECURITY_EXPIRES:-}
+      RETENTION_DAYS: ${RETENTION_DAYS:-180}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      FILTER_BOTS: ${FILTER_BOTS:-true}
+      SERVER_SECRET: ${SERVER_SECRET:-}
+      RATE_LIMIT: ${RATE_LIMIT:-120}
+      VIEW_DEDUPE_MINUTES: ${VIEW_DEDUPE_MINUTES:-0}
       # Allow other iframe-based tools to frame /embed (replaces the Notion defaults):
       # EMBED_ALLOWED_ORIGINS: "https://docs.example.com,https://*.team.example.com"
     volumes:
