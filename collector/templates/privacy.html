@@ -6,82 +6,64 @@
 <title>statless-pages · privacy</title>
 <style>
 body{font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Helvetica,Arial,sans-serif;
- max-width:44em;margin:0 auto;padding:2rem 1rem;color:#37352f;background:#ffffff}
-h1{font-size:1.5rem}h2{font-size:1.1rem;margin-top:2em}
+ max-width:46em;margin:0 auto;padding:2rem 1rem;color:#37352f;background:#ffffff}
+h1{font-size:1.5rem}h2{font-size:1.15rem;margin-top:2em}h3{font-size:1rem;margin-top:1.25em}
 code{background:#f1f1ef;padding:0.15em 0.4em;border-radius:4px;font-size:0.9em}
-table{border-collapse:collapse;width:100%}
-th,td{border:1px solid #e3e2e0;padding:0.4em 0.6em;text-align:left;font-size:0.9em}
+table{border-collapse:collapse;width:100%;margin:1rem 0}
+th,td{border:1px solid #e3e2e0;padding:0.5em 0.7em;text-align:left;font-size:0.9em}
+th{background:#fbfbfa}
+.box{background:#f7f7f5;border:1px solid #e3e2e0;border-radius:6px;padding:0.75rem 1rem;margin:1rem 0}
+a{color:#2563eb;text-decoration:none}a:hover{text-decoration:underline}
 </style>
 </head>
 <body>
-<h1>Privacy - what this collector stores (and what it never stores)</h1>
-<p>This service counts page views and reading time for Notion pages, newsletters,
-and README files. It sets <strong>no cookies</strong>, uses no ETags, and does no
-fingerprinting. This page describes the data this collector itself processes;
-the operator of this deployment is the controller for it.</p>
+<h1>Privacy Policy & Data Protection Notice</h1>
+<p>This service counts page views and reading time for Notion pages, newsletters, and documents. It sets <strong>no tracking cookies</strong>, uses no ETags, loads no third-party scripts, and performs no hardware fingerprinting. This notice describes the data processed by this collector in accordance with the EU General Data Protection Regulation (GDPR Art. 13/14), ePrivacy Directive, and applicable privacy laws.</p>
 
-<h2>What is stored per event</h2>
+<div class="box">
+  <strong>Data Controller:</strong> {{ controller_name }}<br>
+  <strong>Contact & Inquiries:</strong> <a href="{{ controller_contact }}">{{ controller_contact }}</a>
+</div>
+
+<h2>1. Lawful Basis & Purposes of Processing (GDPR Art. 6(1)(f))</h2>
+<p>Processing is carried out under <strong>Legitimate Interests (GDPR Article 6(1)(f))</strong>. The operator pursues the legitimate interest of measuring readership volume, coarse geographical distribution, referring platforms, and dwell time across published content. No persistent user profiles, behavioral tracking, cross-site identity resolution, or advertising operations are conducted.</p>
+
+<h2>2. Data Categories Stored per Event</h2>
 <table>
-<tr><th>Field</th><th>Content</th><th>Purpose</th></tr>
-<tr><td><code>doc_key</code></td><td>The slug you chose (e.g. <code>q3-roadmap</code>)</td><td>Which page was viewed</td></tr>
-<tr><td><code>ts</code></td><td>UTC timestamp</td><td>When</td></tr>
-<tr><td><code>ip_hash</code></td><td>HMAC-SHA256(IP, salt)[:32], salt RAM-only, rotated every
-SALT_ROTATE_HOURS (default 24h). Raw IPs are never written to disk.</td><td>Approximate unique counts</td></tr>
-<tr><td><code>country</code></td><td>2-letter ISO country from GeoLite2 (or <code>XX</code> unknown)</td><td>Coarse geography only</td></tr>
-<tr><td><code>referrer</code></td><td>Either an approved <code>?ref=</code> tag or <code>scheme://host</code> only -
-query strings and userinfo are stripped</td><td>Where readers came from</td></tr>
-<tr><td><code>ua</code></td><td>User-Agent, truncated to 512 chars. Reported only as a
-coarse family label in <code>/stats</code> (e.g. "mobile-safari") - never the
-raw string</td><td>Approximate client stats</td></tr>
-<tr><td><code>dwell_seconds</code></td><td>One of 15/30/60/120 (heartbeats only)</td><td>Reading depth</td></tr>
+<tr><th>Field</th><th>Content</th><th>Purpose & Minimisation</th></tr>
+<tr><td><code>doc_key</code></td><td>Document slug (e.g. <code>q3-roadmap</code>)</td><td>Identifies which published page was viewed</td></tr>
+<tr><td><code>ts</code></td><td>UTC timestamp</td><td>Temporal aggregation (daily trends)</td></tr>
+<tr><td><code>ip_hash</code></td><td>HMAC-SHA256(IP, salt)[:32], salt rotated every {{ salt_rotate_hours }}h. Raw IPs are never stored.</td><td>Approximate unique visitor counting within each rotation window</td></tr>
+<tr><td><code>country</code></td><td>2-letter ISO country from GeoLite2 (or <code>XX</code>)</td><td>Coarse regional distribution only</td></tr>
+<tr><td><code>referrer</code></td><td>Approved campaign tag or <code>scheme://host</code> only (paths and queries stripped)</td><td>Source platform attribution without tracking personal URLs</td></tr>
+<tr><td><code>device</code></td><td>Coarse family label (e.g. <code>desktop-chrome</code>, <code>mobile-safari</code>)</td><td>Browser compatibility metrics; raw User-Agent headers are discarded at ingest</td></tr>
+<tr><td><code>dwell_seconds</code></td><td>15, 30, 60, or 120 (heartbeat beacons only)</td><td>Approximate readership depth; scroll/input telemetry is never recorded</td></tr>
 </table>
 
-<h2>Never stored</h2>
-<p>Raw IP addresses. Cookies or device identifiers. Query strings or paths from
-referrers. Scroll, click, or input telemetry. Heartbeat payloads beyond the
-4-value bucket <code>{"t": 15|30|60|120}</code>. The full User-Agent string is
-never exposed via the stats API - only a coarse family label derived from it.</p>
+<h2>3. What is Never Collected or Stored</h2>
+<p>Raw IP addresses, tracking cookies, persistent device identifiers, query strings or URL paths from referrers, mouse movements, clicks, keystrokes, or scroll coordinates are <strong>never collected or stored</strong>. Raw User-Agent strings are classified at the ingestion boundary and immediately discarded.</p>
 
-<h2>Retention</h2>
-<p>Events older than <code>RETENTION_DAYS</code> (default 180) are deleted
-automatically. <code>RETENTION_DAYS=0</code> disables automatic deletion - the
-operator then carries the storage-limitation duty themselves.</p>
+<h2>4. Retention & Storage Limitation (GDPR Art. 5(1)(e))</h2>
+<p>Tracked events are automatically and permanently deleted after <strong>{{ retention_days }} days</strong> via an automated daily pruning job. Ephemeral cryptographic salts rotate every {{ salt_rotate_hours }} hours, breaking re-identification across windows.</p>
 
-<h2>Opt-out</h2>
-<p>Requests carrying <code>DNT: 1</code> or <code>Sec-GPC: 1</code> are not
-recorded (nothing is logged for them, not even the visit).</p>
+<h2>5. Your Rights & GDPR Article 11(2)</h2>
+<p>Under GDPR Chapter III, you have the rights to access (Art. 15), rectification (Art. 16), erasure (Art. 17), restriction of processing (Art. 18), data portability (Art. 20), and objection (Art. 21).</p>
+<p><strong>Application of GDPR Article 11(2):</strong> Because this service does not store raw IP addresses, cookies, or persistent identifiers, and hashes rotate every {{ salt_rotate_hours }} hours, the controller is unable to identify any individual visitor from the stored records. In accordance with Article 11(2) of the GDPR, individual access, rectification, or erasure requests generally cannot be fulfilled unless you provide additional information that uniquely links your device to a specific log entry within an active rotation window.</p>
+<p>Operators can hard-delete all stored events for an entire page key using the document lifecycle purge endpoint.</p>
 
-<p>Rapid re-fetches of the same page (double-loads, prefetches) may be
-collapsed into one recorded view when the operator enables the dedupe window:
-the check compares only the salted IP hash and a short time window, and no new
-data is stored by it.</p>
+<h2>6. Opt-Out Options (Right to Object, Art. 21)</h2>
+<p>You can object to all processing and prevent any visits from being counted through any of the following methods:</p>
+<ul>
+  <li><strong>Direct Web Opt-Out:</strong> Visit the <a href="/opt-out"><strong>Visitor Opt-Out Page</strong></a> to toggle your tracking preference. This sets a single functional cookie strictly to remember your opt-out choice.</li>
+  <li><strong>Global Privacy Control (GPC):</strong> Any request carrying the <code>Sec-GPC: 1</code> HTTP header is dropped immediately before recording.</li>
+  <li><strong>Do Not Track (DNT):</strong> Any request carrying <code>DNT: 1</code> is dropped immediately before recording.</li>
+  <li><strong>Header / Query Flag:</strong> Sending <code>X-Opt-Out: 1</code> or appending <code>?optout=1</code> to any tracked URL prevents logging.</li>
+</ul>
 
-<h2>Erasure</h2>
-<p>Because this tracker is cookie-free and stores only salted, rotating IP
-hashes, it generally cannot re-identify a person to fulfill an individual
-erasure request. Operators can hard-delete all events for a given
-<code>doc_key</code> with <code>db.purge_doc()</code>, and daily retention
-pruning bounds all stored data automatically.</p>
+<h2>7. Right to Lodge a Complaint (GDPR Art. 13(2)(d))</h2>
+<p>If you believe that the processing of personal data relating to you infringes the GDPR or applicable national data protection law, you have the right to lodge a complaint with a supervisory authority, in particular in the EU/EEA Member State of your habitual residence, place of work, or place of the alleged infringement (or the Information Commissioner's Office in the UK).</p>
 
-<h2>Visibility of statistics</h2>
-<p>Aggregate counts for a page may be publicly visible at
-<code>/stats/...doc_key...</code> unless the operator has gated them with an
-access token. Individual, identifying data is not published there - only the
-aggregate fields described above (views, unique counts within each salt
-window, dwell buckets, top countries/referrers, coarse browser-family labels).</p>
-
-<h2>Legal position (not legal advice)</h2>
-<p>Cookie-free, no-identifier tracking with rotating pseudonymised IPs is
-commonly run on legitimate interests (GDPR Art. 6(1)(f)); pseudonymised IP
-hashes remain personal data under GDPR (EDPB Guidelines 01/2025). Whether any
-particular deployment needs a consent banner depends on the operator's
-documented legitimate-interest assessment and on national ePrivacy
-interpretations (notably DE/FR). Operators embedding this tracker in EU-facing
-pages should publish this page, name a contact, and record a DPIA/legitimate-
-interest assessment. UK GDPR/PECR and US state privacy laws (e.g. CCPA/CPRA
-"sale/share" and universal opt-out signals like GPC) have separate,
-operator-specific requirements - this software implements the technical
-signals (DNT/Sec-GPC honoring, no cookies, origin-only referrers, bounded
-retention), but compliance decisions rest with the operator.</p>
+<h2>8. Access to Statistics & Data Security</h2>
+<p>Aggregate counts for a document are accessible via the stats API. Deployments should be secured behind HTTPS and protected with an access token (<code>STATS_TOKEN</code>) to prevent unauthorized public indexing of site metrics in accordance with GDPR Article 25(2) (Data Protection by Default) and Article 32 (Security of Processing).</p>
 </body>
 </html>

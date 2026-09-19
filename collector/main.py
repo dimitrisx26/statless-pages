@@ -348,13 +348,27 @@ async def healthz() -> dict[str, bool]:
 
 
 @app.get("/privacy", include_in_schema=False)
-async def privacy() -> Response:
-    html = (Path(__file__).parent / "templates" / "privacy.html").read_text()
-    resp = _no_store(HTMLResponse(html))
+async def privacy(request: Request) -> Response:
+    s = get_settings()
+    rotate_hours = (
+        int(s.salt_rotate_hours) if s.salt_rotate_hours.is_integer() else s.salt_rotate_hours
+    )
+    resp = TEMPLATES.TemplateResponse(
+        request,
+        "privacy.html",
+        {
+            "base_url": s.base_url.rstrip("/"),
+            "controller_name": s.controller_name or "Deployment Operator",
+            "controller_contact": s.controller_contact or s.security_contact,
+            "security_contact": s.security_contact,
+            "retention_days": s.retention_days,
+            "salt_rotate_hours": rotate_hours,
+        },
+    )
     resp.headers["Content-Security-Policy"] = (
         "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'"
     )
-    return resp
+    return _no_store(resp)
 
 
 @app.get("/opt-out", include_in_schema=False)
