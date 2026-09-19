@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>statless-pages · opt out</title>
+<style>
+body{font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Helvetica,Arial,sans-serif;
+ max-width:44em;margin:0 auto;padding:2rem 1rem;color:#37352f;background:#ffffff}
+h1{font-size:1.5rem}h2{font-size:1.1rem;margin-top:2em}
+code{background:#f1f1ef;padding:0.15em 0.4em;border-radius:4px;font-size:0.9em}
+.status-box{padding:1rem 1.25rem;border-radius:6px;margin:1.5rem 0;border:1px solid #e3e2e0}
+.status-opted-out{background:#f0fdf4;border-color:#bbf7d0;color:#166534}
+.status-active{background:#fefce8;border-color:#fef08a;color:#854d0e}
+button{background:#2563eb;color:#ffffff;border:none;padding:0.5rem 1rem;border-radius:4px;font-size:1rem;cursor:pointer}
+button.secondary{background:#4b5563}
+button:hover{opacity:0.9}
+a{color:#2563eb;text-decoration:none}a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<h1>Visitor Opt-Out</h1>
+<p>This deployment respects your privacy preferences. You can opt out of all visit and dwell-time tracking on pages tracked by this collector.</p>
+
+{% if is_opted_out %}
+<div class="status-box status-opted-out">
+  <strong>Status: Opted Out</strong>
+  <p style="margin:0.5rem 0 0 0">Visits from your browser will not be recorded.
+  {% if has_gpc %}
+  Your browser sends a <code>Sec-GPC: 1</code> (Global Privacy Control) signal, which is honored automatically.
+  {% elif has_dnt %}
+  Your browser sends a <code>DNT: 1</code> (Do Not Track) signal, which is honored automatically.
+  {% elif has_cookie %}
+  An opt-out cookie is stored in your browser.
+  {% endif %}
+  </p>
+</div>
+<form method="POST" action="/opt-out">
+  <input type="hidden" name="action" value="opt_in">
+  <button type="submit" class="secondary">Cancel Opt-Out (Allow Anonymous Analytics)</button>
+</form>
+{% else %}
+<div class="status-box status-active">
+  <strong>Status: Tracking Active (Anonymous)</strong>
+  <p style="margin:0.5rem 0 0 0">This collector measures approximate views and reading depth using daily-rotating pseudonymous IP hashes without cookies or persistent identifiers.</p>
+</div>
+<form method="POST" action="/opt-out">
+  <input type="hidden" name="action" value="opt_out">
+  <button type="submit">Opt Out of Tracking</button>
+</form>
+{% endif %}
+
+<h2>How opt-out works</h2>
+<p>When you click "Opt Out", this site sets a single functional cookie named <code>statless_opt_out</code> with a 1-year lifespan solely to remember your choice. No tracking data or personal identifiers are stored in this cookie. If you clear your browser cookies, you will need to opt out again.</p>
+
+<p>Alternatively, enabling <strong>Global Privacy Control (GPC)</strong> in your browser (e.g. Brave, Firefox, or privacy extensions) will automatically opt you out on every visit without requiring a cookie.</p>
+
+<p style="margin-top:2rem"><a href="/privacy">← Back to Privacy Notice</a></p>
+</body>
+</html>

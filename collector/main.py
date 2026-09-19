@@ -7,8 +7,10 @@ Endpoints:
     GET  /badge/{doc_key}.svg    SVG view counter (for GitHub READMEs)
     GET  /stats/{doc_key}        JSON aggregates for one doc
     GET  /overview               Per-doc totals across the whole site
-    GET  /export/{doc_key}       JSONL dump of raw events (Art. 15/20 data access)
-    DELETE /docs/{doc_key}       Erase all events for one doc (Art. 17, STATS_TOKEN gated)
+    GET  /export/{doc_key}       NDJSON dump of raw events (operator backup & audit)
+    DELETE /docs/{doc_key}       Purge all events for one doc (operator maintenance)
+    GET  /privacy                Privacy policy with GDPR Art. 13 statutory disclosures
+    GET  /opt-out                Direct visitor opt-out page & toggle
     GET  /healthz                liveness probe
 """
 
@@ -19,12 +21,14 @@ import hmac
 import json
 import logging
 import re
+import sys
 import time
 from collections.abc import AsyncIterator, Iterable, MutableMapping
 from contextlib import asynccontextmanager, suppress
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import parse_qs
 
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -73,7 +77,12 @@ def _invalid_doc_error() -> Response:
 
 
 def _tracking_allowed(request: Request) -> bool:
-    return not any(request.headers.get(header, "").strip() == "1" for header in ("dnt", "sec-gpc"))
+    """True unless visitor opted out via GPC/DNT, opt-out cookie, header, or query param."""
+    if any(request.headers.get(h, "").strip() == "1" for h in ("dnt", "sec-gpc", "x-opt-out")):
+        return False
+    if request.cookies.get("statless_opt_out", "").strip() == "1":
+        return False
+    return request.query_params.get("optout") != "1" and request.query_params.get("opt_out") != "1"
 
 
 # Crawlers, link-preview/unfurl bots, headless browsers. Deliberately excludes
@@ -229,8 +238,14 @@ async def _record_event(
 async def lifespan(app: FastAPI):
     await db.init_db()
     salt.start_rotation_loop()
-    get_geo()  # warm the in-RAM reader
-    retention = get_settings().retention_days
+    settings = get_settings()
+    retention = settings.retention_days
+    if not settings.stats_token:
+        log.warning(
+            "GDPR Art. 25(2) Notice: STATS_TOKEN is not configured. "
+            "/stats, /overview, and /export are publicly accessible. "
+            "Configure STATS_TOKEN to enforce Data Protection by Default."
+        )
 
     async def retention_loop() -> None:
         if retention <= 0:
@@ -342,6 +357,71 @@ async def privacy() -> Response:
     return resp
 
 
+@app.get("/opt-out", include_in_schema=False)
+async def opt_out_get(request: Request) -> Response:
+    s = get_settings()
+    is_opted_out = (
+        request.cookies.get("statless_opt_out", "").strip() == "1"
+        or request.headers.get("x-opt-out", "").strip() == "1"
+        or request.headers.get("sec-gpc", "").strip() == "1"
+        or request.headers.get("dnt", "").strip() == "1"
+    )
+    resp = TEMPLATES.TemplateResponse(
+        request,
+        "opt_out.html",
+        {
+            "base_url": s.base_url.rstrip("/"),
+            "is_opted_out": is_opted_out,
+            "has_gpc": request.headers.get("sec-gpc", "").strip() == "1",
+            "has_dnt": request.headers.get("dnt", "").strip() == "1",
+            "has_cookie": request.cookies.get("statless_opt_out", "").strip() == "1",
+        },
+    )
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'self'"
+    )
+    return _no_store(resp)
+
+
+@app.post("/opt-out", include_in_schema=False)
+async def opt_out_post(request: Request) -> Response:
+    body = (await request.body()).decode("utf-8", errors="replace")
+    params = parse_qs(body)
+    action = params.get("action", ["opt_out"])[0]
+    resp = Response(status_code=303, headers={"Location": "/opt-out"})
+    is_https = request.url.scheme == "https" or get_settings().base_url.startswith("https://")
+    if action == "opt_in":
+        resp.delete_cookie(
+            "statless_opt_out",
+            path="/",
+            samesite="none" if is_https else "lax",
+            secure=is_https,
+        )
+        if is_https and sys.version_info >= (3, 14):
+            resp.set_cookie(
+                "statless_opt_out",
+                "",
+                max_age=0,
+                expires=0,
+                path="/",
+                samesite="none",
+                secure=True,
+                partitioned=True,
+            )
+    else:
+        cookie_kwargs: dict[str, Any] = {
+            "max_age": 31536000,
+            "path": "/",
+            "samesite": "none" if is_https else "lax",
+            "secure": is_https,
+            "httponly": True,
+        }
+        if is_https and sys.version_info >= (3, 14):
+            cookie_kwargs["partitioned"] = True
+        resp.set_cookie("statless_opt_out", "1", **cookie_kwargs)
+    return _no_store(resp)
+
+
 @app.get("/", include_in_schema=False)
 async def index() -> JSONResponse:
     s = get_settings()
@@ -355,6 +435,8 @@ async def index() -> JSONResponse:
                 "badge": f"{s.base_url}/badge/YOUR-DOC.svg",
                 "stats": f"{s.base_url}/stats/YOUR-DOC",
                 "overview": f"{s.base_url}/overview",
+                "privacy": f"{s.base_url}/privacy",
+                "opt_out": f"{s.base_url}/opt-out",
             },
         }
     )
@@ -577,9 +659,10 @@ async def export(doc_key: str, request: Request, token: str = "") -> Response:
 
     async def ndjson() -> AsyncIterator[bytes]:
         # Streams row-by-row so a huge doc cannot buffer the whole table in memory.
-        # When stats are public the visitor pseudonym (ip_hash) and the
-        # fingerprint-capable ua column are omitted: they are pseudonymous, but
-        # still personal data under GDPR - publish them only to token holders.
+        # When stats are public, pseudonymous identity fields (ip_hash, device) are
+        # omitted: they are pseudonymous personal data under GDPR and only published
+        # to token holders. Note: this provides operator document backup and audit
+        # export; it does not serve as an individual GDPR Art. 15/20 data access tool.
         include_identity = bool(get_settings().stats_token)
         try:
             async for row in db.iter_export(doc_key, include_identity=include_identity):
@@ -604,10 +687,12 @@ def _stats_token(request: Request, query_token: str) -> str:
 async def delete_doc(
     doc_key: str, request: Request, response: Response, token: str = ""
 ) -> ErasureResult | JSONResponse:
-    """GDPR Art. 17 erasure: hard-delete every stored event for one doc.
+    """Document lifecycle purge: hard-delete every stored event for one doc.
 
+    Used by operators for document maintenance and decommissioning.
     Requires STATS_TOKEN to be configured AND supplied, so a public collector
-    never lets strangers wipe other operators' data.
+    never lets strangers wipe other operators' data. Individual erasure under
+    GDPR Art. 17 is governed by Art. 11(2) as individual visits are non-identifiable.
     """
     if not _valid_doc(doc_key):
         return _no_store(JSONResponse({"ok": False, "error": "invalid doc key"}, status_code=400))
@@ -640,7 +725,14 @@ async def robots() -> Response:
 @app.get("/.well-known/security.txt", include_in_schema=False)
 async def security_txt() -> Response:
     s = get_settings()
-    lines = [f"Contact: {s.security_contact}", "Preferred-Languages: en"]
+    lines = [f"Contact: {s.security_contact}"]
+    if s.security_expires:
+        lines.append(f"Expires: {s.security_expires}")
+    else:
+        # RFC 9116 §2.5.5: Expires field is REQUIRED in security.txt.
+        expires = (datetime.now(UTC) + timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        lines.append(f"Expires: {expires}")
+    lines.append("Preferred-Languages: en")
     if s.security_policy:
         lines.append(f"Policy: {s.security_policy}")
     resp = _no_store(Response("\n".join(lines) + "\n", media_type="text/plain; charset=utf-8"))
