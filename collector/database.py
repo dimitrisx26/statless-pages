@@ -8,7 +8,7 @@ Schema - single ``events`` table keeps the standalone story simple:
     ip_hash       TEXT              (HMAC-SHA256 w/ rotating salt - never a raw IP)
     country       CHAR(2)           (GeoIP2 ISO code, "XX" unknown)
     referrer      TEXT              (approved tag, or URL origin-only - never a query string)
-    ua            TEXT              (User-Agent, truncated to 512 chars)
+    device        TEXT              (coarse device label - raw UA discarded for Art. 5(1)(c))
     kind          TEXT              ("view" | "heartbeat")
     dwell_seconds INT nullable      (15/30/60/120 for heartbeats, NULL for views)
 
@@ -64,7 +64,7 @@ class Event(Base):
     ip_hash: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     country: Mapped[str] = mapped_column(String(2), nullable=False, default="XX")
     referrer: Mapped[str] = mapped_column(String(2048), nullable=False, default="")
-    ua: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    device: Mapped[str] = mapped_column(String(32), nullable=False, default="other")
     kind: Mapped[str] = mapped_column(String(16), nullable=False, default="view")
     dwell_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
@@ -141,7 +141,7 @@ async def delete_old_events(retention_days: int) -> int:
 
 
 async def purge_doc(doc_key: str) -> int:
-    """Hard-delete all events for one doc_key (Art. 17 erasure helper)."""
+    """Hard-delete all events for one doc_key (operator maintenance and doc lifecycle purge)."""
     async with _session() as session:
         result = cast(
             "CursorResult[Any]",
@@ -204,6 +204,7 @@ async def log_event(
     country: str = "XX",
     referrer: str = "",
     ua: str = "",
+    device: str = "",
     kind: str = "view",
     dwell_seconds: int | None = None,
     dedupe_minutes: int = 0,
@@ -212,7 +213,10 @@ async def log_event(
 
     dedupe_minutes > 0 collapses repeated views of the same doc by the same
     ip_hash within the window (rapid double-loads, prefetches) into one.
+    The raw User-Agent header is classified at ingest into a coarse device label
+    and immediately discarded, satisfying GDPR Art. 5(1)(c) data minimisation.
     """
+    dev_label = device or classify_device(ua)
     async with _session() as session:
         if dedupe_minutes > 0:
             cutoff = datetime.now(UTC) - timedelta(minutes=dedupe_minutes)
@@ -237,7 +241,7 @@ async def log_event(
                 ip_hash=_truncate(ip_hash, 32),
                 country=(country or "XX")[:2].upper() or "XX",
                 referrer=_normalize_referrer(referrer or ""),
-                ua=_truncate(ua or "", _UA_MAX),
+                device=_truncate(dev_label or "other", 32),
                 kind=kind,
                 dwell_seconds=dwell_seconds,
             )
@@ -268,12 +272,14 @@ async def count_events(doc_key: str) -> int:
 
 
 async def iter_export(doc_key: str, include_identity: bool = True) -> AsyncIterator[dict[str, Any]]:
-    """Raw event rows for one doc, oldest first, streamed (JSONL export, Art. 15/20 access).
+    """Raw event rows for one doc, oldest first, streamed (NDJSON export).
 
     Streaming keeps memory flat no matter how many events a doc has.
-    ``include_identity=False`` omits the pseudonymous ``ip_hash`` and the
-    fingerprint-capable ``ua`` column - used when stats are public, so the
-    per-visitor pseudonym trail is only published to token holders.
+    ``include_identity=False`` omits the pseudonymous ``ip_hash`` and ``device``
+    columns - used when stats are public, so the per-visitor pseudonym trail is
+    only published to token holders. Note: this provides operator document backup
+    and event audit export; it does not serve as an individual GDPR Art. 15/20
+    data subject export because individual visitors are non-identifiable under Art. 11(2).
     """
     fields = ["ts", "doc_key", "country", "referrer", "kind", "dwell_seconds"]
     columns = [
@@ -285,8 +291,8 @@ async def iter_export(doc_key: str, include_identity: bool = True) -> AsyncItera
         Event.dwell_seconds,
     ]
     if include_identity:
-        fields[2:2] = ["ip_hash", "ua"]
-        columns[2:2] = [Event.ip_hash, Event.ua]
+        fields[2:2] = ["ip_hash", "device"]
+        columns[2:2] = [Event.ip_hash, Event.device]
     async with _session() as session:
         result = await session.stream(
             select(*columns).where(Event.doc_key == doc_key).order_by(Event.ts)
@@ -427,18 +433,16 @@ async def get_stats(
 
         devices = (
             await session.execute(
-                select(Event.ua, func.count())
+                select(Event.device, func.count())
                 .where(where, Event.kind == "view")
-                .group_by(Event.ua)
-                .order_by(func.count().desc())
-                .limit(200)
+                .group_by(Event.device)
+                .order_by(func.count().desc(), Event.device)
             )
         ).all()
-        device_counts: dict[str, int] = {}
-        for ua, n in devices:
-            label = classify_device(ua)
-            device_counts[label] = device_counts.get(label, 0) + n
-        device_list = sorted(device_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        device_list = sorted(
+            [{"device": dev or "other", "count": n} for dev, n in devices],
+            key=lambda item: (-item["count"], item["device"]),
+        )
 
     return {
         "doc": doc_key,
@@ -449,5 +453,5 @@ async def get_stats(
         "daily": daily,
         "countries": [{"country": c, "count": n} for c, n in countries],
         "referrers": [{"referrer": r, "count": n} for r, n in referrers],
-        "devices": [{"device": label, "count": n} for label, n in device_list],
+        "devices": device_list,
     }
